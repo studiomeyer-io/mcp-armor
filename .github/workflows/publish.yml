@@ -1,0 +1,86 @@
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write   # required for cosign keyless OIDC
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build release
+        run: cargo build --release --target ${{ matrix.target }} --bin mcp-armor
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/mcp-armor dist/mcp-armor
+          cp README.md LICENSE CHANGELOG.md dist/
+          cd dist
+          tar czf ../mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.tar.gz *
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: cosign sign-blob (keyless OIDC)
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.sigstore.json \
+            mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.sigstore.json
+
+  release:
+    name: github release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.sigstore.json
+          generate_release_notes: true
+
+  cargo-publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: publish
+        # `--locked` enforces Cargo.lock — release artifact must match the
+        # lockfile bit-for-bit so no transitive dep can sneak in between
+        # tag-push and crates.io publish (P1 fix S983).
+        run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

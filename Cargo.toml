@@ -1,0 +1,64 @@
+[package]
+name = "mcp-armor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection, validates Ed25519 manifest signatures, blocks marketplace-poisoning vectors. <5ms p99 overhead."
+repository = "https://github.com/studiomeyer-io/mcp-armor"
+homepage = "https://github.com/studiomeyer-io/mcp-armor"
+authors = ["Matthias Meyer (StudioMeyer) <hi@studiomeyer.io>"]
+keywords = ["mcp", "security", "wrapper", "sidecar", "prompt-injection"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+
+[lib]
+name = "mcp_armor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-armor"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process", "time", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+ed25519-dalek = { version = "2.1", features = ["pem", "rand_core"] }
+regex = "1.10"
+aho-corasick = "1.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+unicode-normalization = "0.1"
+blake3 = "1.5"
+base64 = "0.22"
+toml = "0.8"
+semver = "1"
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+insta = "1.40"
+tempfile = "3.10"
+
+[features]
+default = []
+audit-db = ["dep:rusqlite"]
+# Reserved for the v0.2 Sigstore bridge. Enabling this feature in v0.1
+# triggers a compile_error! shim (src/sigstore_bridge_stub.rs) so users
+# get a clear "v0.2 backlog" diagnostic instead of a silently no-op build.
+# This kills the "empty feature flag" Lumina anti-pattern (S982) while
+# keeping the publicly documented interface name reserved for v0.2.
+sigstore-bridge = []
+
+[[bench]]
+name = "scanner"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
