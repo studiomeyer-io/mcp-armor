@@ -48,7 +48,7 @@ jobs:
             --yes \
             --bundle mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.sigstore.json \
             mcp-armor-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: |
