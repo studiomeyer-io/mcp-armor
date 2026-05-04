@@ -22,7 +22,7 @@ jobs:
         # require `edition = "2024"`, which only stabilised in Rust 1.85.
         rust: [1.85.0, stable]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: install rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@master
         with:
@@ -55,7 +55,7 @@ jobs:
     name: bench regression gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: bench
@@ -65,7 +65,7 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install cargo-audit
