@@ -4,6 +4,53 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-05-04
+
+Cold cross-review hardening pass. Three substantive fixes plus four
+repo-hygiene additions. No behavioural regressions, no API changes.
+
+### Fixed
+
+- **CI broken-by-design.** The previous `--all-features` invocation in
+  `.github/workflows/ci.yml` activated the reserved `sigstore-bridge`
+  feature flag, which intentionally fires `compile_error!`
+  (`src/sigstore_bridge_stub.rs`). Result: every CI run on `main` was
+  red since v0.1.0. Replaced with explicit `--features audit-db` plus a
+  dedicated `cargo check --features sigstore-bridge` step that asserts
+  the stub still rejects the build (defence against accidental
+  un-stubbing).
+- **Mutex-poisoning crash vector** in `src/control/history.rs`. The
+  three `.lock().expect("history mutex")` sites would panic the entire
+  sidecar if a writer panicked while holding the lock. Replaced with a
+  shared `lock_inner` helper that recovers the inner `RingBuffer` via
+  `PoisonError::into_inner()` — correct for an audit/observability ring
+  buffer (worst case one entry was half-written). Regression test:
+  `recovers_from_poisoned_mutex`.
+- **Unicode evasion gap.** `src/scanner/unicode.rs` only stripped 7
+  zero-width code points and no Bidi formatting. Added the four
+  invisible math operators (U+2061–U+2064) plus all nine Bidi
+  formatting code points (U+202A–U+202E, U+2066–U+2069). Closes the
+  RTL-override / Trojan-Source bypass class. Regression tests:
+  `strips_invisible_math_operators`, `strips_bidi_override`,
+  `strips_all_bidi_formatting`, `strips_combined_evasion`.
+
+### Added
+
+- `SECURITY.md` with vulnerability disclosure policy (72 h ack, 30 d
+  fix target, scope definition, coordinated disclosure).
+- `CONTRIBUTING.md` with build/test workflow, MSRV pin, what we accept,
+  what we are slow on, coding standards (no `unwrap()` in non-test
+  paths, mutex poison-recovery helper, clippy-pedantic).
+- README "Status" section listing v0.1 vs v0.2 backlog as a single
+  table — no more spelunking through CHANGELOG to find the open items.
+
+### Hardened
+
+- `.gitignore` extended with `.env`, `.env.local`, `.env.*.local`,
+  `*.log`, `coverage/`, `*.sqlite`, `*.sqlite3`, `*.db`,
+  `*.sigstore.json`, `*.pem`. Prevents accidental commit of audit-db
+  databases, sigstore bundles, or environment secrets.
+
 ## [0.1.0] — 2026-05-03
 
 Initial release.

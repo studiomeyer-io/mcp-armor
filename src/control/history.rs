@@ -3,8 +3,18 @@
 
 use crate::scanner::{ScanResult, ScanVerdict};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Recover the inner data on poison instead of panicking.
+///
+/// `expect()` on a poisoned mutex would crash the sidecar — fatal in a
+/// stdio proxy where the parent client cannot restart us. The history is
+/// audit/observability data, not a security gate; recovering the inner
+/// `RingBuffer` is correct (worst case one entry was half-written).
+fn lock_inner<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -54,7 +64,7 @@ impl ScanHistory {
             cve_refs: result.cve_refs.clone(),
             latency_us: result.latency_us,
         };
-        let mut buf = self.inner.lock().expect("history mutex");
+        let mut buf = lock_inner(&self.inner);
         buf.total_blocked += 1;
         if buf.entries.len() < buf.cap {
             buf.entries.push(entry);
@@ -71,7 +81,7 @@ impl ScanHistory {
     /// is a coarse string filter (lexicographic compare on ISO-8601). Limit
     /// caps the output count.
     pub fn snapshot(&self, since_iso: Option<&str>, limit: Option<usize>) -> Vec<HistoryEntry> {
-        let buf = self.inner.lock().expect("history mutex");
+        let buf = lock_inner(&self.inner);
         let mut out: Vec<HistoryEntry> = if buf.len < buf.cap {
             buf.entries.iter().cloned().collect()
         } else {
@@ -90,7 +100,7 @@ impl ScanHistory {
     }
 
     pub fn total_blocked(&self) -> u64 {
-        self.inner.lock().expect("history mutex").total_blocked
+        lock_inner(&self.inner).total_blocked
     }
 }
 
@@ -226,5 +236,35 @@ mod tests {
             h.record("inbound", &block_result("a"));
         }
         assert_eq!(h.snapshot(None, Some(3)).len(), 3);
+    }
+
+    /// Regression for v0.1.1 F2: a poisoned mutex must not crash the
+    /// sidecar. `lock_inner` recovers the inner RingBuffer; subsequent
+    /// reads return whatever the panicking writer left behind.
+    #[test]
+    fn recovers_from_poisoned_mutex() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let h = Arc::new(ScanHistory::new(10));
+        h.record("inbound", &block_result("seed"));
+
+        let h_clone = Arc::clone(&h);
+        // Force a poison by panicking while holding the lock.
+        let result = thread::spawn(move || {
+            let _guard = lock_inner(&h_clone.inner);
+            panic!("intentional panic to poison the mutex");
+        })
+        .join();
+        assert!(result.is_err(), "thread should have panicked");
+
+        // Now the lock is poisoned. Reads must still work, not crash.
+        let snap = h.snapshot(None, None);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(h.total_blocked(), 1);
+
+        // Writes after poison must also work.
+        h.record("inbound", &block_result("after-poison"));
+        assert_eq!(h.total_blocked(), 2);
     }
 }

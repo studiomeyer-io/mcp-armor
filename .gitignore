@@ -1,8 +1,27 @@
+# Build artefacts
 /target
 **/*.rs.bk
 Cargo.lock.bak
+
+# Editor / OS detritus
 .DS_Store
 *.swp
 .idea/
 .vscode/
 node_modules/
+
+# Secrets — must NEVER be committed
+.env
+.env.local
+.env.*.local
+
+# Local data + logs (audit-db feature uses sqlite)
+*.log
+coverage/
+*.sqlite
+*.sqlite3
+*.db
+
+# cosign / sigstore local artefacts
+*.sigstore.json
+*.pem

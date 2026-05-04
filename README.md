@@ -156,6 +156,28 @@ cargo bench --bench scanner
 
 Test counts come from `cargo test` directly. There is no inflated count claim in this README.
 
+## Status
+
+**v0.1.x — early production.** The scanner pipeline, Ed25519 verify and
+control-plane MCP server are stable enough for daily use as a stdio
+sidecar in front of trusted MCP servers. The features intentionally not
+in v0.1 are documented in CHANGELOG "Known limitations" and re-stated
+here for visibility:
+
+| Area | Status |
+|---|---|
+| stdio proxy + scanner pipeline | shipped, p99 < 5 ms enforced in CI |
+| Ed25519 manifest verify (stateless) | shipped |
+| TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | **v0.2 backlog** |
+| Sigstore bridge (sigstore-rs 0.10) | **v0.2 backlog** — `sigstore-bridge` Cargo feature is a reserved no-op |
+| OTLP gRPC export | **v0.2 backlog** — v0.1 logs a warn-line if `OTEL_EXPORTER_OTLP_ENDPOINT` is set |
+| rmcp 1.6 control-plane | **v0.2 backlog** — v0.1 ships a hand-rolled JSON-RPC server |
+| Windows targets | **v0.2 backlog** — Linux + macOS only |
+| `armor_check_cve` semver-range matching | **v0.2 backlog** — v0.1 substring-matches `fixed_in` |
+
+Security disclosure policy: [SECURITY.md](SECURITY.md). Contributing
+guide: [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright 2026 Matthias Meyer (StudioMeyer).

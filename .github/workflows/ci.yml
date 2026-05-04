@@ -29,11 +29,24 @@ jobs:
       - name: fmt check
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: test
-        run: cargo test --all-features --no-fail-fast
+        # Avoid --all-features: that activates the reserved `sigstore-bridge`
+        # flag which is a v0.2 placeholder and intentionally fires
+        # `compile_error!` (see src/sigstore_bridge_stub.rs).
+        run: cargo clippy --all-targets --features audit-db -- -D warnings
+      - name: test (with audit-db)
+        run: cargo test --features audit-db --no-fail-fast
+      - name: test (default features)
+        run: cargo test --no-default-features --no-fail-fast
+      - name: verify sigstore-bridge stub still rejects build
+        run: |
+          if cargo check --features sigstore-bridge 2>/dev/null; then
+            echo "ERROR: sigstore-bridge feature compiled — compile_error! stub bypassed."
+            exit 1
+          else
+            echo "OK: sigstore-bridge stub correctly rejects build (v0.2 placeholder)."
+          fi
       - name: cve simulation
-        run: cargo test --test cve_simulation -- --nocapture
+        run: cargo test --features audit-db --test cve_simulation -- --nocapture
 
   bench:
     name: bench regression gate
