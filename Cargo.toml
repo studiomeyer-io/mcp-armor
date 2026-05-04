@@ -37,7 +37,7 @@ blake3 = "1.5"
 base64 = "0.22"
 toml = "0.8"
 semver = "1"
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
