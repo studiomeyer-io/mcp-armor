@@ -83,4 +83,21 @@ jobs:
         # `--locked` enforces Cargo.lock — release artifact must match the
         # lockfile bit-for-bit so no transitive dep can sneak in between
         # tag-push and crates.io publish (P1 fix S983).
-        run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # Token via env var rather than --token CLI arg so it doesn't
+        # appear in `ps aux`.
+        # Graceful-skip on "already published": a manual `cargo publish`
+        # before the tag-push must not paint the workflow red (S991 race
+        # fix — happened on v0.1.1 publish).
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -o pipefail
+          if cargo publish --locked 2>&1 | tee publish.log; then
+            echo "OK: published to crates.io"
+          elif grep -qE "already (uploaded|exists)" publish.log; then
+            echo "OK: version already on crates.io (manual publish before tag-push, harmless)"
+            exit 0
+          else
+            echo "ERROR: cargo publish failed for an unexpected reason"
+            exit 1
+          fi
