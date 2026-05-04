@@ -17,7 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        rust: [1.75.0, stable]
+        # MSRV bumped 1.75.0 -> 1.85.0 in v0.1.1: transitive deps from
+        # ed25519-dalek (pem feature) and clap pulled in crates that
+        # require `edition = "2024"`, which only stabilised in Rust 1.85.
+        rust: [1.85.0, stable]
     steps:
       - uses: actions/checkout@v4
       - name: install rust ${{ matrix.rust }}

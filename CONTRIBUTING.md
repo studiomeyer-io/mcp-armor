@@ -16,8 +16,9 @@ cargo test --features audit-db
 cargo bench --bench scanner -- --quick   # optional
 ```
 
-MSRV is **Rust 1.75**. CI tests both 1.75.0 and stable on Linux and
-macOS — your patch needs to compile on the floor.
+MSRV is **Rust 1.85** (bumped from 1.75 in v0.1.1 — transitive
+dependencies require `edition = "2024"`). CI tests both 1.85.0 and
+stable on Linux and macOS — your patch needs to compile on the floor.
 
 ## What we accept
 

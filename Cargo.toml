@@ -2,7 +2,7 @@
 name = "mcp-armor"
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT"
 description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection, validates Ed25519 manifest signatures, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"

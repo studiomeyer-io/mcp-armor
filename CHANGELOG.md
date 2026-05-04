@@ -51,6 +51,15 @@ repo-hygiene additions. No behavioural regressions, no API changes.
   `*.sigstore.json`, `*.pem`. Prevents accidental commit of audit-db
   databases, sigstore bundles, or environment secrets.
 
+### Changed
+
+- **MSRV bump 1.75 → 1.85.** Transitive dependencies pulled by
+  `ed25519-dalek` (`pem` feature) and `clap` now require
+  `edition = "2024"`, which only stabilised in Rust 1.85.0
+  (February 2025). v0.1.0 CI was silently broken on Rust 1.75 because
+  of this — local `cargo publish` succeeded only because the developer
+  ran a modern toolchain. CI matrix updated to `[1.85.0, stable]`.
+
 ## [0.1.0] — 2026-05-03
 
 Initial release.

@@ -24,7 +24,7 @@ Or from source:
 cargo install mcp-armor
 ```
 
-MSRV: **Rust 1.75**.
+MSRV: **Rust 1.85** (bumped from 1.75 in v0.1.1 — transitive deps now require `edition = "2024"`, which only stabilised in 1.85).
 
 ## Usage
 

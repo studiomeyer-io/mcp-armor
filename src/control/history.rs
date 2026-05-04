@@ -133,6 +133,12 @@ fn format_rfc3339_utc(unix_secs: i64) -> String {
 /// Howard Hinnant's algorithm (proleptic Gregorian, correct for the full
 /// 100/400 leap-year rule). Reference:
 /// https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+///
+/// `clippy::similar_names` is allowed here on purpose: `doe` (day-of-era)
+/// and `doy` (day-of-year) are the canonical variable names from
+/// Hinnant's published algorithm. Renaming them would obscure the
+/// reference implementation.
+#[allow(clippy::similar_names)]
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     // Shift epoch from 1970-01-01 to 0000-03-01 to simplify month math.
     let z = days + 719_468;
