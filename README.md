@@ -8,6 +8,16 @@ mcp-armor sits between an MCP client (Claude Desktop, Windsurf, Cursor) and an u
 
 Sister project: [studiomeyer-io/ai-shield](https://github.com/studiomeyer-io/ai-shield) — TypeScript policy engine that mcp-armor's evasion patterns are ported from (Round 4 zero-width + tag-unicode work).
 
+## A note from us
+
+We have been building tools and systems for ourselves for the past two years. The fact that this repo is small and has few stars is not because it is new. It is because we only just decided to share what we have built. It is not a fresh experiment, it is a long story with a recent commit.
+
+We love building things and sharing them. We do not love social media tactics, growth hacks, or chasing stars and followers. So this repo is small. The code is real, it gets used, issues get answered. Judge for yourself.
+
+If it helps you, sharing, testing, and feedback help us. If it could be better, an issue is more useful. If you build something with it, tell us at hello@studiomeyer.io. That genuinely makes our day.
+
+From a small studio in Palma de Mallorca.
+
 ## Install
 
 Pre-built binaries (signed via cosign):
