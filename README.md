@@ -1,6 +1,13 @@
 # mcp-armor
 
-Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures, blocks marketplace-poisoning vectors. Single signed binary, p99 budget under 5 ms.
+
+<!-- badges -->
+[![crates.io version](https://img.shields.io/crates/v/mcp-armor?style=flat-square&color=000000&logo=rust&label=crates.io)](https://crates.io/crates/mcp-armor)
+[![crates.io downloads](https://img.shields.io/crates/d/mcp-armor?style=flat-square&color=000000&logo=rust&label=installs)](https://crates.io/crates/mcp-armor)
+![License](https://img.shields.io/github/license/studiomeyer-io/mcp-armor?style=flat-square&color=22c55e&label=license)
+![Last commit](https://img.shields.io/github/last-commit/studiomeyer-io/mcp-armor?style=flat-square&color=88c0d0&label=updated)
+![GitHub stars](https://img.shields.io/github/stars/studiomeyer-io/mcp-armor?style=flat-square&color=ffd700&logo=github&label=stars)
+<!-- /badges -->Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures, blocks marketplace-poisoning vectors. Single signed binary, p99 budget under 5 ms.
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
