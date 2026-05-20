@@ -1,5 +1,15 @@
 //! Control-plane tool registry. Returns the JSON-Schema list MCP clients
 //! consume via `tools/list`.
+//!
+//! v0.2 expansion: 9 tools (was 6). New entries:
+//!   - `armor_get_keystore` — list pinned TOFU keys (read-only).
+//!   - `armor_verify_bundle` — parse cosign sigstore.json + structural verify
+//!     (read-only, offline).
+//!   - `armor_rekor_lookup` — query the Sigstore Rekor transparency log
+//!     for a manifest's inclusion (read-only, online — hits Rekor REST).
+//!     Behind `--features sigstore-bridge` at build time; when the feature
+//!     is off the schema is still listed (so clients see the surface) but
+//!     calls return `error.code = -32004` "feature disabled".
 
 use serde_json::{json, Value};
 
@@ -97,6 +107,50 @@ pub fn list() -> Value {
                     "readOnlyHint": true,
                     "destructiveHint": false
                 }
+            },
+            {
+                "name": "armor_get_keystore",
+                "description": "v0.2 — List pinned TOFU maintainer public keys (server_name + fingerprint + pinned_at_iso). Read-only inspection of the keystore configured at sidecar startup (no caller-supplied path — operator-only via `--keystore` flag).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "destructiveHint": false
+                }
+            },
+            {
+                "name": "armor_verify_bundle",
+                "description": "v0.2 — Parse a cosign sigstore.json bundle and structurally verify the Rekor SignedEntryTimestamp shape. Offline.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "bundle_json": {"type": "string"}
+                    },
+                    "required": ["bundle_json"]
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "destructiveHint": false
+                }
+            },
+            {
+                "name": "armor_rekor_lookup",
+                "description": "v0.2 — Query the Sigstore Rekor transparency log for inclusion of a manifest's artifact hash. Requires --features sigstore-bridge at build time. Network call.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tools_list_response": {"type": "object"},
+                        "rekor_url": {"type": "string", "description": "Override Rekor endpoint; defaults to https://rekor.sigstore.dev"}
+                    },
+                    "required": ["tools_list_response"]
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "destructiveHint": false
+                }
             }
         ]
     })
@@ -107,28 +161,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_has_six_entries() {
+    fn list_has_nine_entries_v02() {
         let v = list();
         let arr = v["tools"].as_array().expect("array");
-        assert_eq!(arr.len(), 6);
+        assert_eq!(
+            arr.len(),
+            9,
+            "v0.2 expects 9 control-plane tools (6 v0.1 + 3 v0.2)"
+        );
         let names: Vec<&str> = arr
             .iter()
             .map(|t| t["name"].as_str().expect("string"))
             .collect();
-        assert!(names.contains(&"armor_scan_payload"));
-        assert!(names.contains(&"armor_verify_manifest"));
-        assert!(names.contains(&"armor_list_blocked"));
-        assert!(names.contains(&"armor_get_policy"));
-        assert!(names.contains(&"armor_check_cve"));
-        assert!(names.contains(&"armor_simulate_attack"));
+        for required in [
+            "armor_scan_payload",
+            "armor_verify_manifest",
+            "armor_list_blocked",
+            "armor_get_policy",
+            "armor_check_cve",
+            "armor_simulate_attack",
+            "armor_get_keystore",
+            "armor_verify_bundle",
+            "armor_rekor_lookup",
+        ] {
+            assert!(names.contains(&required), "missing tool: {required}");
+        }
     }
 
     #[test]
     fn all_tools_read_only() {
         let v = list();
         for t in v["tools"].as_array().expect("array") {
-            assert_eq!(t["annotations"]["readOnlyHint"], true);
-            assert_eq!(t["annotations"]["destructiveHint"], false);
+            assert_eq!(
+                t["annotations"]["readOnlyHint"], true,
+                "tool {} must be readOnly",
+                t["name"]
+            );
+            assert_eq!(
+                t["annotations"]["destructiveHint"], false,
+                "tool {} must not be destructive",
+                t["name"]
+            );
         }
     }
 }

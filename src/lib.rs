@@ -33,8 +33,9 @@ pub mod manifest;
 pub mod otel;
 pub mod policy;
 pub mod proxy;
+#[cfg(feature = "rmcp-control")]
+pub mod rmcp_server;
 pub mod scanner;
-mod sigstore_bridge_stub;
 
 pub use control::history::ScanHistory;
 pub use error::ArmorError;

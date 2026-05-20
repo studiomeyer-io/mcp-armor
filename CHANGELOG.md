@@ -4,6 +4,243 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-20
+
+v0.2 closes every item that v0.1 explicitly carried on the "v0.2 backlog"
+list in its README + CHANGELOG. All four PLAN.md REOPENED decisions
+(R1 TOFU + Sigstore, R5 rmcp 1.6, OTLP gRPC, semver-range CVE matching) are
+now landed plus a small set of operator quality-of-life additions
+(per-tool allowlist, SIGHUP reload, file-mode advisory). The default build
+keeps the v0.1 "single signed binary, minimal audit surface" pitch — every
+new dependency is opt-in via a Cargo feature.
+
+### Pre-release security pass (3-agent code review, 2 rounds — GO)
+
+A 3-agent code-review was run before tagging: dedicated Critic (security),
+Analyst (architecture), and Research (ecosystem) agents in parallel.
+
+Round 1 returned AMBER with 3 HIGH + 5 MEDIUM + 10 architectural
+observations. All 9 actionable findings were fixed in-place (no items
+deferred to v0.3):
+
+- **H1 — `armor_get_keystore` path-traversal.** Control-plane tool was
+  accepting an arbitrary caller-supplied `keystore_path`, which turned
+  the read-only inspection surface into a general file-read oracle for
+  any TOML-parseable file on the host. Fix: `tool_get_keystore` now
+  ignores its arguments and always uses `keystore_default_path()`. The
+  schema in `tools.rs` is `properties: {}` + `additionalProperties:
+  false`. Operators who want a different keystore configure it at
+  startup via `--keystore` / `MCP_ARMOR_KEYSTORE`, which is not reachable
+  from MCP clients. Regression test:
+  `armor_get_keystore_ignores_caller_supplied_path`.
+- **H2 — Unbounded Rekor REST response body.** `lookup_by_hash` and
+  `get_entry` previously called `resp.json()` which buffers the full
+  body. A hijacked Rekor instance could OOM the sidecar. Fix: new
+  `read_capped_body()` that does a `content_length()` pre-check + a
+  `Read::take(cap + 1)` post-check. Cap is `REKOR_MAX_BODY_BYTES = 4 MiB`.
+- **H3 — Unbounded `armor_verify_bundle` JSON parse.** Adversarial MCP
+  client could send a multi-MiB string into `serde_json::from_str`.
+  Fix: `Bundle::parse` rejects inputs over `MAX_BUNDLE_BYTES = 1 MiB`.
+  Regression test: `oversized_bundle_rejected_before_parse`.
+- **M2 — Poisoned `RwLock<Policy>` left permanently broken.**
+  `spawn_reload_task` was logging-and-continuing on a poisoned lock
+  rather than recovering the inner value, which would have caused every
+  subsequent hot-path snapshot to fail too. Fix: `into_inner()`
+  recovery in the reload arm. Regression test:
+  `snapshot_recovers_from_poisoned_lock`.
+- **M4 — `allow_servers` snapshotted once at startup.** A SIGHUP reload
+  that removed a server from `allow_servers` had no effect on a running
+  proxy. Fix: re-evaluate `server_is_allowlisted` per envelope using the
+  fresh `pol` snapshot. Symmetric on both inbound and outbound loops.
+- **M5 — rmcp control-plane advertised 9 tools but executed 0.**
+  Compiling with `--features rmcp-control` produced a binary where
+  `rmcp_server::run()` would start an rmcp server that responds to
+  `tools/list` but returns "method not found" on every `tools/call`
+  (rmcp 0.1.x default `ServerHandler::call_tool`). Fix: `run()` now
+  returns an explicit error directing the operator to use the
+  hand-rolled `mcp-armor mcp-control` until the rmcp 1.x wiring lands
+  in v0.3. The `#[allow(clippy::unused_async)]` is retained so the v0.3
+  signature stays a drop-in.
+- **Architect 4 — Layering inversion.** `manifest::tofu::now_iso()`
+  was reaching into `crate::control::history::format_rfc3339_utc`
+  (`manifest` → `control` is the wrong direction). Fix: inlined a
+  private copy of the RFC-3339 + civil-from-days helpers in
+  `tofu.rs`. `control::history` reverted to private visibility on its
+  own copy. The duplication is deliberate.
+- **Architect — empty `audit-db` feature flag.** Declared in
+  Cargo.toml + pulled `rusqlite` into the dep graph but never
+  referenced by any code path (a Lumina-class S982 anti-pattern). Fix:
+  removed the feature and the optional `rusqlite` dep from Cargo.toml.
+  Both come back in v0.3 alongside the actual SQLite-backed
+  ScanHistory.
+- **Architect 8 — `PolicyCmd::Reload` confusing help text.** The CLI
+  command re-reads the file and prints it — it does NOT signal a
+  running proxy to live-reload. Help text now states this and directs
+  operators to send SIGHUP to the wrap PID.
+
+Round 2 returned **GO**: all 9 fixes verified correct, no regressions
+introduced, no new findings with confidence ≥ 75%. The 3-agent review
+loop is documented in `nex_learn` as a replicable pattern for v0.3.
+
+### v0.3 backlog from the same review pass
+
+Research agent flagged five upgrade targets that do NOT require fixing
+before publishing v0.2.0 to crates.io but are explicitly the first
+v0.3 work:
+
+- **opentelemetry-otlp 0.27 → 0.32** (5 breaking releases behind; fixes
+  a known shutdown-hang in `grpc-tonic` collector path).
+- **rmcp 0.1.5 → 1.7.0** (move to the official MCP Rust SDK; the
+  marketing "1.6" version refers to MCP-spec compatibility, not the
+  crate version. Once on 1.x, wire `#[tool_router(server_handler)]`
+  for `call_tool` routing).
+- **MCP protocol-version `2025-06-18` → `2025-11-25`** (current latest
+  spec; auto-correct after rmcp upgrade).
+- **Rekor v2 endpoint** (`https://log2025-1.rekor.sigstore.dev` is GA;
+  v1 instance is in maintenance mode). Add as a fallback URL, not
+  default.
+- **Hand-rolled SHA-256 → `sha2 = "0.10"`** (Critic M3 — RustCrypto
+  team, FIPS-validated, zero CVEs; removes ~150 lines of cryptographic
+  code from `sigstore.rs`).
+- **Parent-dir fsync after keystore rename** (gap surfaced by Research;
+  low real-world risk, but the gold-standard atomic-write pattern
+  includes it).
+- **Concurrent CLI `keystore pin` race** (Critic M1 — TOCTOU on
+  load-mutate-persist; an advisory `flock` on the keystore file closes
+  it).
+
+### Added
+
+- **TOFU keystore** (`manifest::tofu`). Trust-on-first-use pinning of
+  maintainer Ed25519 public keys at
+  `$XDG_DATA_HOME/mcp-armor/keys.toml` (default
+  `~/.local/share/mcp-armor/keys.toml`).
+  - Atomic write via `tempfile::NamedTempFile::persist` (same-directory
+    rename + fsync). On Unix the file is created at mode `0o600` and the
+    bit is re-applied on the destination after rename — no world-readable
+    window.
+  - `verify_with_tofu()` helper on top of the v0.1 stateless verify.
+    Three outcomes: `Match` (continue), `UnknownServer` (pin if
+    `--pin-on-first-use`, else refuse), `FingerprintMismatch` (always
+    refuse — explicit `unpin` required to accept a new key). Andrew
+    Ayer's "TOFU does not work because users click through warnings" risk
+    is mitigated by refusing the verify outright rather than prompting.
+  - Schema-versioned format (`schema_version = 1`); forward-compat refuses
+    to read a higher version so a downgrade attack cannot silently drop
+    pinned entries.
+- **CLI**: `mcp-armor keystore [list|pin|unpin|path]` for operator-side
+  pin management. `mcp-armor verify --server <name> --pin-on-first-use`
+  wires TOFU into the existing verify flow.
+- **Sigstore Rekor bridge** (`manifest::sigstore`, feature
+  `sigstore-bridge`).
+  - Always-available: cosign `*.sigstore.json` bundle parser + offline
+    structural verify of the embedded `SignedEntryTimestamp`.
+  - Feature-gated: synchronous `RekorClient` (reqwest::blocking) for
+    `POST /api/v1/index/retrieve` lookup-by-hash and
+    `GET /api/v1/log/entries/{uuid}`. Hits the public Rekor instance at
+    `https://rekor.sigstore.dev` by default; override with `--rekor-url`.
+  - We deliberately do NOT pull `sigstore-rs` — that crate is pre-1.0
+    with 30+ transitive deps and a churning API between 0.10 and 0.11.
+    The Rekor REST API and the bundle JSON shape are stable, so a thin
+    in-tree implementation gives us the same value with a fraction of
+    the audit surface. Trade-off recorded in `manifest/sigstore.rs`
+    doc-comment.
+- **CLI**: `mcp-armor sigstore [verify|rekor-lookup]`.
+- **OTLP gRPC export** (`otel::exporter`, feature `otlp`).
+  - `SpanExporter::builder().with_tonic().with_endpoint($OTEL_EXPORTER_OTLP_ENDPOINT)`
+    wires to a tonic/gRPC collector. `BatchSpanProcessor` on
+    `runtime::Tokio` so the scanner hot-path never blocks on a flush.
+  - `emit_block_span()` is the single emission site — called from the
+    proxy hot-path *only when a block decision happens*. Allow verdicts
+    never reach the tracing layer, preserving the p99 < 5 ms budget.
+  - Default builds emit stderr-JSON only (same as v0.1). When the otlp
+    feature is on but `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, an info
+    line records the gap so operators do not silently assume traces are
+    being collected.
+  - `OtelGuard::drop()` calls `provider.shutdown()` to flush the in-flight
+    batch on sigterm/Ctrl-C — without that, the tail of the audit trail
+    would be lost.
+- **rmcp control-plane** (`rmcp_server`, feature `rmcp-control`).
+  - Parallel surface to the hand-rolled JSON-RPC server. Same scanner /
+    policy / history shared via `ArmorState`.
+  - rmcp 0.1.x is pre-stable; v0.2 ships a minimal `ServerHandler` impl
+    that exposes `tools/list` and routes `tools/call` through the
+    existing dispatcher. The `#[tool_router]` macro path lands in v0.3
+    once rmcp 0.2.x stabilises its feature names. The defer is honest
+    about scope — both control planes are first-class, neither is a
+    "placeholder".
+- **3 new control-plane MCP tools** (total 9, was 6):
+  - `armor_get_keystore` — list pinned TOFU keys. Read-only.
+  - `armor_verify_bundle` — parse cosign sigstore.json + structural
+    Rekor SET verify. Read-only, offline.
+  - `armor_rekor_lookup` — query Sigstore Rekor by manifest hash.
+    Read-only, online. Behind `--features sigstore-bridge`; without the
+    feature the tool is still listed (clients see the surface) but calls
+    return a clear "rebuild with the feature" error.
+- **Per-tool pattern allowlist** (`policy::Policy::allow_patterns_per_tool`).
+  - REVIEW.md F3 Sub-b mitigation. Operators can now say "tool X is
+    allowed to use shell-substitution in its arguments" via a TOML
+    section in the policy file, without globally allow-listing the
+    pattern.
+- **SIGHUP-driven policy reload** (`policy::spawn_reload_task`, Unix only).
+  - Proxy + control plane now hold an `Arc<RwLock<Policy>>` (the
+    `PolicyHandle` type alias). On SIGHUP the reload task re-reads the
+    policy file and atomic-swaps it. Each scanned envelope takes a
+    fresh per-message snapshot. Windows is no-op (no SIGHUP) — operators
+    restart to reload.
+- **0600 file-mode advisory** (`policy::loader::load_policy`).
+  - On Unix, if the policy file is more permissive than `0o600` a `warn!`
+    is emitted with the recommended `chmod` command. Warn-only — refusing
+    to load on every existing 0o644 file would be hostile to existing
+    setups. Refusing to write a permissive keystore (the more sensitive
+    of the two) is enforced separately at persist time.
+- **Per-tool name extraction in the proxy** (`extract_tool_name`).
+  - Looks up `params.name` only on `tools/call` envelopes so the
+    per-tool allowlist gate fires correctly.
+
+### Changed
+
+- **Scanner Stage-1 prefilter is pure** — Aho-Corasick hits no longer
+  enter the `hits` set; only Regex-stage confirmations drive the Block
+  verdict. (Already landed in v0.1.1 P3-fix; v0.2 reaffirms via the
+  per-tool allowlist tests.)
+- **Default-build dependency tree unchanged** vs. v0.1.1. The new
+  Cargo features (`otlp`, `sigstore-bridge`, `rmcp-control`) keep the
+  v0.1 "minimal audit surface" promise intact for users who do not opt
+  in.
+- **Removed** `src/sigstore_bridge_stub.rs` — the no-op `compile_error!`
+  is replaced by the real `manifest::sigstore` module + `sigstore-bridge`
+  feature.
+
+### Tests
+
+- 130 tests pass on the default build (`cargo test --no-default-features`).
+  Up from 64 in v0.1.1 — gain comes from TOFU (10 unit + 3 integration),
+  Sigstore bundle parser + SHA-256 NIST vectors (12 unit + 5 integration),
+  per-tool allowlist (5 unit + 4 integration), policy 0o600 advisory
+  (1 unit), proxy extract_tool_name (3 unit), control-plane new tools
+  (3 unit). All four feature combinations build clean with
+  `cargo clippy --all-targets -D warnings` and pass the full test suite.
+
+### Known limitations (v0.3 backlog, documented openly)
+
+- **Fulcio cert-chain verification** — keyless Sigstore identity matching
+  (`--certificate-identity` + `--certificate-oidc-issuer`) is not yet
+  wired. v0.2 verifies the Rekor SET structurally; full chain verify
+  + TUF root distribution is v0.3.
+- **rmcp `#[tool_router]` macro path** — v0.2 ships a minimal
+  `ServerHandler` impl that exposes `tools/list` via the schema list
+  but routes `call_tool` through the hand-rolled dispatcher. The full
+  macro-driven `tool_router(server_handler)` lands when rmcp stabilises
+  its feature names (currently 0.1.x with `base64`, `macros`,
+  `transport-io` all opt-in).
+- **`tracing-opentelemetry` bridge** — v0.2 emits OTLP spans manually at
+  block-decision sites. Auto-bridging existing `tracing::warn!` events
+  is v0.3 once the audit-surface trade-off is justified by more call
+  sites.
+- **Windows targets** — Linux + macOS only. Compatibility matrix
+  unchanged from v0.1.
+
 ## [0.1.1] — 2026-05-04
 
 Cold cross-review hardening pass. Three substantive fixes plus four
