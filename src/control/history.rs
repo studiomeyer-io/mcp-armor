@@ -1,5 +1,12 @@
-//! In-memory ring-buffer scan history. Default mode (no `audit-db` feature):
-//! 10k-entry circular buffer, no disk write. Read by `armor_list_blocked`.
+//! In-memory ring-buffer scan history: 10k-entry circular buffer, no disk
+//! write. Read by `armor_list_blocked`.
+//!
+//! Persistent (SQLite-backed) history is a v0.3 backlog item. The v0.1/v0.2
+//! `audit-db` Cargo feature was a non-functional declaration that landed
+//! without a corresponding code path (Round-1-review finding A#2). It was
+//! removed in v0.2.0 to avoid shipping the "empty feature flag" Lumina
+//! anti-pattern (S982). v0.3 will re-introduce both the feature and the
+//! `rusqlite`-backed implementation together.
 
 use crate::scanner::{ScanResult, ScanVerdict};
 use serde::{Deserialize, Serialize};
@@ -115,6 +122,13 @@ fn now_iso() -> String {
 /// UTC string, e.g. `2026-05-03T14:23:45Z`. Pure-stdlib civil-from-days
 /// (Howard Hinnant's algorithm shifted to a 1970 epoch); proleptic
 /// Gregorian, valid 1970..9999. No chrono dep, no sub-second precision.
+///
+/// v0.2 Round-1-review note: `manifest::tofu::format_rfc3339_utc` holds
+/// the sibling copy of this function. The two are duplicated rather than
+/// shared via a `util` module because (a) sharing would create a new
+/// always-loaded module for a single ~30-line function and (b) the
+/// alternative (`manifest` importing `control`) inverts the intended
+/// layering. Treat this as a deliberate de-dup avoidance.
 fn format_rfc3339_utc(unix_secs: i64) -> String {
     let secs_per_day: i64 = 86_400;
     let days = unix_secs.div_euclid(secs_per_day);

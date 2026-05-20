@@ -7,7 +7,7 @@
 
 use crate::control::history::ScanHistory;
 use crate::error::ArmorError;
-use crate::policy::{FailMode, Policy};
+use crate::policy::{snapshot, FailMode, Policy, PolicyHandle};
 use crate::scanner::{ScanResult, ScanVerdict, Scanner};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -56,12 +56,17 @@ fn server_is_allowlisted(program: &str, allow_servers: &[String]) -> bool {
 /// audit trails surface real proxy-level blocks via `armor_list_blocked`,
 /// not just control-plane-triggered scans.
 ///
+/// v0.2 — `policy` is a [`PolicyHandle`] (`Arc<RwLock<Policy>>`) so SIGHUP
+/// reloads land in the running proxy. Each scanned envelope takes a fresh
+/// per-message snapshot (cheap clone of a small struct) so the hot-path
+/// never holds the read-lock across an `.await`.
+///
 /// Returns once the upstream process exits or stdin EOFs.
 pub async fn run_proxy(
     program: &str,
     args: &[String],
     scanner: Arc<Scanner>,
-    policy: Arc<Policy>,
+    policy: PolicyHandle,
     history: Arc<ScanHistory>,
 ) -> Result<(), ArmorError> {
     let mut child: Child = Command::new(program)
@@ -83,13 +88,20 @@ pub async fn run_proxy(
     let scanner_in = scanner.clone();
     let policy_in = policy.clone();
     let history_in = history.clone();
-    let bypass_scanner = server_is_allowlisted(program, &policy.allow_servers);
-    if bypass_scanner {
+    // v0.2 — initial startup advisory: scanner bypass status at boot. The
+    // per-envelope hot-path below re-evaluates this against the *current*
+    // policy snapshot, so a SIGHUP reload that removes a server from
+    // `allow_servers` takes effect on the next message (Round 1 M4 fix).
+    let startup_bypass = server_is_allowlisted(program, &snapshot(&policy).allow_servers);
+    if startup_bypass {
         tracing::info!(
             program = program,
-            "policy.allow_servers matched — scanner bypassed for this upstream"
+            "policy.allow_servers matched at startup — scanner bypassed for this upstream (re-evaluated per envelope, can be cleared via SIGHUP reload)"
         );
     }
+    let program_name = program.to_string();
+    let program_for_in = program.to_string();
+    let program_for_out = program.to_string();
 
     // Inbound: client → child, scanned (unless allowlisted).
     let inbound = tokio::spawn(async move {
@@ -118,8 +130,16 @@ pub async fn run_proxy(
                 }
             };
 
+            // v0.2: fresh snapshot per envelope so a SIGHUP reload between
+            // messages is visible immediately. Cheap struct-clone, drop the
+            // read-lock before any .await.
+            let pol: Policy = snapshot(&policy_in);
+
             // Policy: allowlisted upstream binary skips the scanner entirely.
-            if bypass_scanner {
+            // Round 1 M4 fix: re-evaluated against the *current* snapshot so
+            // a SIGHUP reload that removes a server from `allow_servers`
+            // takes effect on the next envelope.
+            if server_is_allowlisted(&program_for_in, &pol.allow_servers) {
                 let mut out = line;
                 out.push('\n');
                 child_stdin.write_all(out.as_bytes()).await?;
@@ -127,21 +147,37 @@ pub async fn run_proxy(
             }
 
             let scan_target = extract_scan_target(&envelope);
-            let result = scanner_in.scan_with(&scan_target, policy_in.scan_unicode);
+            let result = scanner_in.scan_with(&scan_target, pol.scan_unicode);
+            let tool_name = extract_tool_name(&envelope);
 
-            let allow_pattern = !result.matched_patterns.is_empty()
+            let allow_pattern_global = !result.matched_patterns.is_empty()
                 && result
                     .matched_patterns
                     .iter()
-                    .all(|p| policy_in.allow_patterns.contains(p));
+                    .all(|p| pol.allow_patterns.contains(p));
+
+            // v0.2 — per-tool allowlist (REVIEW.md F3 Sub-b mitigation).
+            let allow_pattern_per_tool = tool_name
+                .as_deref()
+                .is_some_and(|t| pol.tool_allows_patterns(t, &result.matched_patterns));
+
+            let allow_pattern = allow_pattern_global || allow_pattern_per_tool;
 
             let blocked = matches!(result.verdict, ScanVerdict::Block) && !allow_pattern;
 
             if blocked {
                 history_in.record("inbound", &result);
+                // v0.2 — also push an OTLP span when the otlp feature is on.
+                // No-op otherwise.
+                crate::otel::emit_block_span(
+                    "inbound",
+                    &result.matched_patterns,
+                    &result.cve_refs,
+                    result.latency_us,
+                );
             }
 
-            if blocked && matches!(policy_in.fail_mode, FailMode::Closed) {
+            if blocked && matches!(pol.fail_mode, FailMode::Closed) {
                 let id = envelope.get("id").cloned().unwrap_or(Value::Null);
                 let response = block_response(id, &result.matched_patterns, &result.cve_refs);
                 let mut out = serde_json::to_string(&response)?;
@@ -149,6 +185,8 @@ pub async fn run_proxy(
                 stdout.write_all(out.as_bytes()).await?;
                 stdout.flush().await?;
                 tracing::warn!(
+                    program = %program_name,
+                    tool = %tool_name.as_deref().unwrap_or(""),
                     matched = ?result.matched_patterns,
                     cves = ?result.cve_refs,
                     latency_us = result.latency_us,
@@ -159,6 +197,8 @@ pub async fn run_proxy(
 
             if blocked {
                 tracing::warn!(
+                    program = %program_name,
+                    tool = %tool_name.as_deref().unwrap_or(""),
                     matched = ?result.matched_patterns,
                     cves = ?result.cve_refs,
                     "warn-and-pass (fail_mode=open)"
@@ -187,25 +227,39 @@ pub async fn run_proxy(
                 Err(e) => return Err::<(), ArmorError>(ArmorError::Io(e)),
             };
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !bypass_scanner {
-                let result: ScanResult = scanner_out.scan_with(trimmed, policy_out.scan_unicode);
-                if !result.matched_patterns.is_empty() {
-                    let allow_pattern = result
-                        .matched_patterns
-                        .iter()
-                        .all(|p| policy_out.allow_patterns.contains(p));
-                    if !allow_pattern {
-                        // Outbound is warn-only (we never tamper with server
-                        // output) but the block still counts for the audit
-                        // trail surfaced by armor_list_blocked.
-                        history_out.record("outbound", &result);
+            if !trimmed.is_empty() {
+                let pol: Policy = snapshot(&policy_out);
+                // Round 1 M4 fix: outbound also re-evaluates allow_servers
+                // per-line so SIGHUP reloads are honoured symmetrically.
+                if !server_is_allowlisted(&program_for_out, &pol.allow_servers) {
+                    let result: ScanResult = scanner_out.scan_with(trimmed, pol.scan_unicode);
+                    if !result.matched_patterns.is_empty() {
+                        // Note (Analyst observation 7): outbound intentionally
+                        // applies only the *global* allow_patterns — never the
+                        // per-tool allowlist — because outbound traffic is
+                        // server→client and tool-name attribution is unreliable
+                        // (the server may emit unrelated diagnostics). Outbound
+                        // is also warn-only: matches never block, only log.
+                        let allow_pattern = result
+                            .matched_patterns
+                            .iter()
+                            .all(|p| pol.allow_patterns.contains(p));
+                        if !allow_pattern {
+                            history_out.record("outbound", &result);
+                            crate::otel::emit_block_span(
+                                "outbound",
+                                &result.matched_patterns,
+                                &result.cve_refs,
+                                result.latency_us,
+                            );
+                        }
+                        tracing::warn!(
+                            matched = ?result.matched_patterns,
+                            cves = ?result.cve_refs,
+                            latency_us = result.latency_us,
+                            "outbound match (warn-only)"
+                        );
                     }
-                    tracing::warn!(
-                        matched = ?result.matched_patterns,
-                        cves = ?result.cve_refs,
-                        latency_us = result.latency_us,
-                        "outbound match (warn-only)"
-                    );
                 }
             }
             let mut out = line;
@@ -232,6 +286,21 @@ pub async fn run_proxy(
 
     let _ = child.wait().await?;
     Ok(())
+}
+
+/// v0.2 — extract the tool name from a `tools/call` envelope. Used by the
+/// per-tool allowlist to decide whether to override a Block verdict.
+/// Returns `None` for non-tools/call methods or malformed envelopes.
+fn extract_tool_name(envelope: &Value) -> Option<String> {
+    let method = envelope.get("method").and_then(Value::as_str)?;
+    if method != "tools/call" {
+        return None;
+    }
+    envelope
+        .get("params")
+        .and_then(|p| p.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Pluck the part of the envelope worth scanning. Concretely:
@@ -318,5 +387,37 @@ mod tests {
             r["error"]["data"]["matched_patterns"][0],
             "shell_substitution"
         );
+    }
+
+    // v0.2 — extract_tool_name covers
+    #[test]
+    fn extract_tool_name_returns_name_for_tools_call() {
+        let env = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {}}
+        });
+        assert_eq!(extract_tool_name(&env), Some("echo".to_string()));
+    }
+
+    #[test]
+    fn extract_tool_name_returns_none_for_other_methods() {
+        let env = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        });
+        assert_eq!(extract_tool_name(&env), None);
+    }
+
+    #[test]
+    fn extract_tool_name_returns_none_when_params_missing() {
+        let env = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call"
+        });
+        assert_eq!(extract_tool_name(&env), None);
     }
 }

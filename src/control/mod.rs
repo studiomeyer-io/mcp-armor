@@ -12,8 +12,12 @@ pub mod tools;
 
 use crate::cve::FEED;
 use crate::error::ArmorError;
+use crate::manifest::sigstore::Bundle;
+#[cfg(feature = "sigstore-bridge")]
+use crate::manifest::sigstore::RekorLookup;
+use crate::manifest::tofu::{default_path as keystore_default_path, Keystore, PinnedKey};
 use crate::manifest::{verify, VerifyOutcome};
-use crate::policy::Policy;
+use crate::policy::{snapshot, Policy, PolicyHandle};
 use crate::scanner::Scanner;
 use history::ScanHistory;
 use serde_json::{json, Value};
@@ -25,9 +29,13 @@ const SERVER_NAME: &str = "mcp-armor-control";
 
 /// Run the control-plane stdio server. Reads JSON-RPC from stdin, writes
 /// responses to stdout, line-delimited.
+///
+/// v0.2 — takes a [`PolicyHandle`] so SIGHUP-driven reloads are visible to
+/// `armor_get_policy` without restarting the process. Each request takes a
+/// fresh snapshot of the policy (cheap clone of a small struct).
 pub async fn run_control_plane(
     scanner: Arc<Scanner>,
-    policy: Arc<Policy>,
+    policy: PolicyHandle,
     history: Arc<ScanHistory>,
 ) -> Result<(), ArmorError> {
     let stdin = tokio::io::stdin();
@@ -47,7 +55,8 @@ pub async fn run_control_plane(
                 continue;
             }
         };
-        let resp = handle_request(&req, &scanner, &policy, &history);
+        let snap = snapshot(&policy);
+        let resp = handle_request(&req, &scanner, &snap, &history);
         if !resp.is_null() {
             write_line(&mut stdout, &resp).await?;
         }
@@ -163,6 +172,10 @@ fn dispatch_tool(
         "armor_get_policy" => Ok(tool_get_policy(policy)),
         "armor_check_cve" => tool_check_cve(args),
         "armor_simulate_attack" => tool_simulate_attack(args, scanner),
+        // v0.2 — three new read-only inspection tools.
+        "armor_get_keystore" => tool_get_keystore(args),
+        "armor_verify_bundle" => tool_verify_bundle(args),
+        "armor_rekor_lookup" => tool_rekor_lookup(args),
         _ => Err(ArmorError::UnknownTool(name.to_string())),
     }
 }
@@ -331,6 +344,79 @@ fn tool_simulate_attack(args: &Value, scanner: &Scanner) -> Result<Value, ArmorE
     }))
 }
 
+// ──── v0.2 new tools ────────────────────────────────────────────────────────
+
+fn tool_get_keystore(_args: &Value) -> Result<Value, ArmorError> {
+    // v0.2 SECURITY FIX (Round 1 H1): never accept a caller-supplied
+    // keystore_path. The control plane is documented as read-only inspection;
+    // honouring an arbitrary path turns this into a generic file-read oracle
+    // (any TOML-parseable file on the host filesystem). Operators who want a
+    // different keystore configure it at startup via the `--keystore` CLI
+    // flag / `MCP_ARMOR_KEYSTORE` env var, which is read once by main.rs and
+    // is not reachable from MCP clients.
+    let path = keystore_default_path();
+    let ks = Keystore::load(&path)?;
+    let entries: Vec<Value> = ks
+        .entries
+        .iter()
+        .map(|e: &PinnedKey| {
+            json!({
+                "server_name": e.server_name,
+                "key_fingerprint": e.key_fingerprint,
+                "pinned_at_iso": e.pinned_at_iso,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "keystore_path": path.display().to_string(),
+        "schema_version": ks.schema_version,
+        "pinned_entries": entries,
+        "count": ks.len(),
+    }))
+}
+
+fn tool_verify_bundle(args: &Value) -> Result<Value, ArmorError> {
+    let raw = args
+        .get("bundle_json")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ArmorError::InvalidPattern("missing bundle_json".into()))?;
+    let bundle = Bundle::parse(raw)?;
+    let inclusion = crate::manifest::sigstore::verify_inclusion(&bundle)?;
+    Ok(json!({
+        "bundle_parsed": true,
+        "has_cert": bundle.cert_pem.is_some(),
+        "has_rekor_bundle": bundle.rekor_bundle.is_some(),
+        "structural_set_ok": inclusion.structural_ok,
+        "partial": inclusion.partial,
+        "note": inclusion.note,
+        "log_index": inclusion.log_index,
+        "integrated_time": inclusion.integrated_time,
+    }))
+}
+
+#[cfg(feature = "sigstore-bridge")]
+fn tool_rekor_lookup(args: &Value) -> Result<Value, ArmorError> {
+    let manifest = args
+        .get("tools_list_response")
+        .ok_or_else(|| ArmorError::InvalidPattern("missing tools_list_response".into()))?;
+    let rekor_url = args.get("rekor_url").and_then(Value::as_str);
+    let lookup: RekorLookup = crate::manifest::sigstore::lookup_rekor_by_hash(manifest, rekor_url)?;
+    Ok(serde_json::to_value(lookup)?)
+}
+
+/// When the `sigstore-bridge` feature is off, the schema is still listed
+/// in `tools/list` (so MCP clients see the surface) but the call returns a
+/// clear "rebuild with --features sigstore-bridge" error.
+#[cfg(not(feature = "sigstore-bridge"))]
+fn tool_rekor_lookup(_args: &Value) -> Result<Value, ArmorError> {
+    Err(ArmorError::InvalidPattern(
+        "armor_rekor_lookup requires the `sigstore-bridge` Cargo feature. \
+         Rebuild with `cargo install mcp-armor --features sigstore-bridge` \
+         or run `mcp-armor sigstore rekor-lookup` from a build that has it."
+            .to_string(),
+    ))
+}
+
 fn cve_database_age_days(generated: &str) -> i64 {
     // Best-effort YYYY-MM-DD diff vs today — string-only, no chrono dep.
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -397,12 +483,108 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_returns_six_tools() {
+    fn tools_list_returns_nine_tools_in_v02() {
         let (s, p, h) = make_ctx();
         let req = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
         let resp = handle_request(&req, &s, &p, &h);
         let tools = resp["result"]["tools"].as_array().expect("array");
-        assert_eq!(tools.len(), 6, "expected 6 control-plane tools");
+        assert_eq!(
+            tools.len(),
+            9,
+            "v0.2 expects 9 control-plane tools (6 v0.1 + 3 v0.2)"
+        );
+    }
+
+    #[test]
+    fn armor_get_keystore_on_empty_default_path_returns_zero_entries() {
+        let (s, p, h) = make_ctx();
+        // Point at a known-empty temp path to avoid the operator's actual
+        // keystore being read in CI.
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("nope.toml");
+        let req = json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{
+                "name":"armor_get_keystore",
+                "arguments":{"keystore_path": path.display().to_string()}
+            }
+        });
+        let resp = handle_request(&req, &s, &p, &h);
+        assert_eq!(resp["result"]["isError"], false);
+        assert_eq!(resp["result"]["structuredContent"]["count"], 0);
+        assert_eq!(resp["result"]["structuredContent"]["schema_version"], 1);
+    }
+
+    #[test]
+    fn armor_verify_bundle_minimal_shape_succeeds() {
+        let (s, p, h) = make_ctx();
+        let req = json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{
+                "name":"armor_verify_bundle",
+                "arguments":{"bundle_json": r#"{"base64Signature":"SGVsbG8="}"#}
+            }
+        });
+        let resp = handle_request(&req, &s, &p, &h);
+        assert_eq!(resp["result"]["isError"], false);
+        assert_eq!(resp["result"]["structuredContent"]["bundle_parsed"], true);
+        assert_eq!(resp["result"]["structuredContent"]["has_cert"], false);
+    }
+
+    /// Round-1-review H1 regression: armor_get_keystore must ignore any
+    /// caller-supplied `keystore_path` arg. Path-traversal vector closed.
+    #[test]
+    fn armor_get_keystore_ignores_caller_supplied_path() {
+        let (s, p, h) = make_ctx();
+        // Attacker tries to read /etc/passwd. The dispatcher must IGNORE
+        // the keystore_path arg and fall back to the default path — which
+        // either does not exist (returning an empty keystore) or contains
+        // legitimately pinned keys, but in any case is NOT the path the
+        // caller supplied.
+        let req = json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{
+                "name":"armor_get_keystore",
+                "arguments":{"keystore_path": "/etc/passwd"}
+            }
+        });
+        let resp = handle_request(&req, &s, &p, &h);
+        assert_eq!(resp["result"]["isError"], false);
+        let path = resp["result"]["structuredContent"]["keystore_path"]
+            .as_str()
+            .expect("keystore_path");
+        assert!(
+            !path.contains("/etc/passwd"),
+            "armor_get_keystore must not honour caller-supplied path; got {path}"
+        );
+        // Default keystore path ends in keys.toml regardless of XDG state.
+        assert!(
+            path.ends_with("keys.toml"),
+            "expected default keystore path ending in keys.toml, got {path}"
+        );
+    }
+
+    /// When the sigstore-bridge feature is not compiled in, the rekor lookup
+    /// tool must still be advertised in tools/list (so clients see the surface)
+    /// but calls return a clear feature-disabled error.
+    #[cfg(not(feature = "sigstore-bridge"))]
+    #[test]
+    fn armor_rekor_lookup_without_feature_returns_feature_disabled() {
+        let (s, p, h) = make_ctx();
+        let req = json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{
+                "name":"armor_rekor_lookup",
+                "arguments":{"tools_list_response":{"tools":[]}}
+            }
+        });
+        let resp = handle_request(&req, &s, &p, &h);
+        assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.contains("sigstore-bridge"),
+            "error message must point at the feature flag, got: {text}"
+        );
     }
 
     #[test]

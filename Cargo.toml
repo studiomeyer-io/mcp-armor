@@ -1,10 +1,10 @@
 [package]
 name = "mcp-armor"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection, validates Ed25519 manifest signatures, blocks marketplace-poisoning vectors. <5ms p99 overhead."
+description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection, validates Ed25519 manifest signatures with TOFU keystore + optional Sigstore Rekor bridge, exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"
 homepage = "https://github.com/studiomeyer-io/mcp-armor"
 authors = ["Matthias Meyer (StudioMeyer) <hi@studiomeyer.io>"]
@@ -21,13 +21,16 @@ name = "mcp-armor"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.40", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process", "time", "sync"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+opentelemetry = { version = "0.27", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
 ed25519-dalek = { version = "2.1", features = ["pem", "rand_core"] }
 regex = "1.10"
 aho-corasick = "1.1"
@@ -37,7 +40,30 @@ blake3 = "1.5"
 base64 = "0.22"
 toml = "0.8"
 semver = "1"
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+tempfile = "3.10"
+# v0.2 Round-1-review observation (Analyst #2): `rusqlite` was declared as
+# an optional dep for an `audit-db` feature that was *never* wired into
+# any code path. Removing it: shipping a feature flag that does nothing is
+# a Lumina anti-pattern (S982). When SQLite-backed audit storage actually
+# ships in v0.3 the dep + feature come back together with the code that
+# uses them.
+# v0.2 Sigstore Rekor bridge — uses a thin reqwest-based REST client against
+# the Rekor v1 API (`/api/v1/index/retrieve`, `/api/v1/log/entries/{uuid}`).
+# We deliberately do NOT pull in `sigstore-rs` itself: that crate is pre-1.0
+# (`will not be considered stable until 1.0`), brings 30+ transitive deps,
+# and its API churns between 0.10 and 0.11. The bundle JSON format and the
+# Rekor REST API are stable, so a thin local implementation gives us the
+# same value with a fraction of the audit surface. reqwest::blocking is
+# already in the dep-cache used elsewhere in the StudioMeyer stack.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+# v0.2 rmcp control-plane migration (PLAN R5). rmcp 0.1.x is what is on
+# crates.io as of 2026-05; the official MCP Rust SDK is still pre-1.0 with
+# feature-flag churn between minor versions. We pin 0.1 minimal-feature
+# ("server" + "transport-io") and build the rmcp control-plane module as a
+# thin re-export of our existing handle_request dispatcher rather than a
+# full macro-driven rewrite. The full `#[tool_router]` macro path lands in
+# v0.3 once the rmcp 1.x release stabilises its feature names.
+rmcp = { version = "0.1", default-features = false, features = ["server", "transport-io", "macros", "base64"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -46,13 +72,32 @@ tempfile = "3.10"
 
 [features]
 default = []
-audit-db = ["dep:rusqlite"]
-# Reserved for the v0.2 Sigstore bridge. Enabling this feature in v0.1
-# triggers a compile_error! shim (src/sigstore_bridge_stub.rs) so users
-# get a clear "v0.2 backlog" diagnostic instead of a silently no-op build.
-# This kills the "empty feature flag" Lumina anti-pattern (S982) while
-# keeping the publicly documented interface name reserved for v0.2.
-sigstore-bridge = []
+# `audit-db` removed in v0.2.0 — was a Lumina-class empty feature flag
+# (Cargo.toml-declared, never referenced in src/). Will land in v0.3
+# alongside the actual SQLite-backed ScanHistory implementation.
+# v0.2 OTLP gRPC export. When enabled wires the real opentelemetry stack:
+# - SpanExporter via grpc-tonic against $OTEL_EXPORTER_OTLP_ENDPOINT
+# - BatchSpanProcessor with rt-tokio so the hot path never blocks on flush
+# When disabled (default) the otel module compiles down to a stderr-json-only
+# tracing-subscriber init — same behaviour as v0.1.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+]
+# v0.2 Sigstore Rekor bridge — replaces the v0.1 no-op stub. Enabling this
+# brings in `reqwest::blocking` for the Rekor REST queries; the cosign bundle
+# JSON parser is in-tree (zero extra deps). Provides:
+#  - manifest::sigstore::Bundle::parse for cosign sigstore.json bundles
+#  - manifest::sigstore::lookup_rekor_by_hash for transparency-log lookups
+#  - manifest::sigstore::verify_inclusion for offline SET verification
+# Default: off so the audit surface stays small.
+sigstore-bridge = ["dep:reqwest"]
+# v0.2 rmcp control-plane migration (PLAN R5 ORIGINAL). When enabled, the
+# control-plane subcommand exposes an rmcp-based server in parallel to the
+# hand-rolled JSON-RPC server (the hand-rolled one stays as default — both
+# share the same Scanner/Policy/ScanHistory state).
+rmcp-control = ["dep:rmcp"]
 
 [[bench]]
 name = "scanner"
