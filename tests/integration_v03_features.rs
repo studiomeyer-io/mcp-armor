@@ -3,7 +3,7 @@
 //! Three Features land in v0.3:
 //!   A — loader-class env-key strip on `wrap`
 //!   B — UTS-39 confusable / homoglyph skeleton (Stage 4)
-//!   C — Trust-Triade CI (workflows-only, not testable from `cargo test`)
+//!   C — supply-chain CI hardening (workflows-only, not testable from `cargo test`)
 //!
 //! Feature C verifies via GitHub Actions runs against PR + main +
 //! weekly schedule; that surface is intentionally out-of-scope here.

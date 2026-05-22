@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.0] — 2026-05-22
 
-v0.3 ships three new defensive layers ("Features" — cherry on top)
+v0.3 ships three new defensive layers
 on top of v0.2, all opt-out via policy.toml and all replicable for the
 StudioMeyer Rust security pillars (ai-shield, mcp-rce-guard,
 mcp-stdio-shellguard). Plus a documentation re-scoping of the v0.3
@@ -53,7 +53,7 @@ before tagging. Findings + fixes documented at the bottom of this entry.
   ASCII-only fast-path keeps p99 budget intact. Tests: 11 unit in
   scanner/confusable + 5 integration in scanner/mod against the
   existing CVE feed pattern set.
-- **Feature C — Trust-Triade CI (supply-chain.yml + scorecard.yml +
+- **Feature C — supply-chain CI hardening (supply-chain.yml + scorecard.yml +
   deny.toml).** Three new CI jobs lift mcp-armor into the Tier where
   Falco / Tetragon / sigstore live:
   - `cargo cyclonedx --format json --all` emits a CycloneDX-1.5 SBOM
