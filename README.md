@@ -1,14 +1,12 @@
 # mcp-armor
 
-<!-- badges -->
-[![crates.io version](https://img.shields.io/crates/v/mcp-armor?style=flat-square&color=000000&logo=rust&label=crates.io)](https://crates.io/crates/mcp-armor)
-[![crates.io downloads](https://img.shields.io/crates/d/mcp-armor?style=flat-square&color=000000&logo=rust&label=installs)](https://crates.io/crates/mcp-armor)
-![License](https://img.shields.io/github/license/studiomeyer-io/mcp-armor?style=flat-square&color=22c55e&label=license)
-![Last commit](https://img.shields.io/github/last-commit/studiomeyer-io/mcp-armor?style=flat-square&color=88c0d0&label=updated)
-![GitHub stars](https://img.shields.io/github/stars/studiomeyer-io/mcp-armor?style=flat-square&color=ffd700&logo=github&label=stars)
-<!-- /badges -->
+[![crates.io](https://img.shields.io/crates/v/mcp-armor.svg)](https://crates.io/crates/mcp-armor)
+[![CI](https://github.com/studiomeyer-io/mcp-armor/actions/workflows/ci.yml/badge.svg)](https://github.com/studiomeyer-io/mcp-armor/actions/workflows/ci.yml)
+[![Supply Chain](https://github.com/studiomeyer-io/mcp-armor/actions/workflows/supply-chain.yml/badge.svg)](https://github.com/studiomeyer-io/mcp-armor/actions/workflows/supply-chain.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/studiomeyer-io/mcp-armor/badge)](https://scorecard.dev/viewer/?uri=github.com/studiomeyer-io/mcp-armor)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (now with **TOFU keystore + Sigstore Rekor bridge** in v0.2), exports **OTLP gRPC telemetry**, blocks marketplace-poisoning vectors. Single signed binary, p99 budget under 5 ms.
+Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (with **TOFU keystore + Sigstore Rekor bridge** since v0.2), exports **OTLP gRPC telemetry**, blocks marketplace-poisoning vectors, **strips loader-class env keys from spawned children** (`LD_PRELOAD`, `NODE_OPTIONS`, … — new in v0.3), folds **Unicode confusables to detect homoglyph evasion** (Cyrillic `іgnоrе` ≈ `ignore` — new in v0.3). Single signed binary, p99 budget under 5 ms.
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
@@ -139,13 +137,23 @@ The `mcp-armor mcp-control` server exposes **9 read-only tools** in v0.2 (6 from
 
 ## Scanner pipeline
 
-Hot-path is three stages, all in-process:
+Hot-path is **four** stages (since v0.3), all in-process:
 
-1. **Aho-Corasick prefilter** — case-insensitive trigger strings sourced from the CVE feed (signal only — never drives Block on its own)
+1. **Aho-Corasick prefilter** — case-insensitive trigger strings sourced from the CVE feed (signal only — never drives Block on its own).
 2. **Regex stage** — compiled once on construction. Confirmed regex hits are the sole verdict signal.
-3. **Unicode normalize + re-scan** — strip zero-width (U+200B…U+200F, U+2060…U+2064, U+FEFF), Bidi formatting (U+202A…U+202E, U+2066…U+2069), and tag-unicode (U+E0000…U+E007F), apply NFKC, re-run stages 1 and 2
+3. **Unicode normalize + re-scan** — strip zero-width (U+200B…U+200F, U+2060…U+2064, U+FEFF), Bidi formatting (U+202A…U+202E, U+2066…U+2069), and tag-unicode (U+E0000…U+E007F), apply NFKC, re-run stages 1 and 2. Gated by `policy.scan_unicode`.
+4. **(v0.3) UTS-39 confusable skeleton + re-scan** — fold Cyrillic / Greek / Cherokee / Latin-Extended look-alikes back to ASCII via a hand-curated ~180-entry table (`src/scanner/confusable.rs`), then re-run stages 1 and 2. Catches `іgnоrе previous instructions` where i / o / e are Cyrillic. Cheap pre-gate via `has_confusables()` keeps the p99 budget intact for pure-ASCII payloads. Gated by `policy.scan_confusable`.
 
 Performance budget: p99 < 5 ms on 100 kB payloads. CI gates a 7 ms hard cliff on `cargo bench --bench scanner`.
+
+## Loader-class env defence (v0.3)
+
+`mcp-armor wrap` now strips a default 7-entry deny-list of loader-class environment variables from the **child** process before spawn:
+
+- Dynamic linker: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`
+- Language runtime: `NODE_OPTIONS`, `PYTHONPATH`, `JAVA_TOOL_OPTIONS`
+
+This closes the **Zealynx 2026 stdio-config side-channel** where a registry-fetched MCP manifest can specify `env: { LD_PRELOAD: "/evil.so" }` and bypass the binary signature verify entirely (env injection is upstream of `exec`). Operators may extend the list via `policy.deny_env_keys`; setting it to `[]` disables the guard. The sidecar also emits a startup `warn!` listing exactly which loader-class keys the operator's shell is leaking into the wrap process.
 
 ## CVE coverage (v0.1.0, OX advisory wave 2026-04-15)
 
@@ -209,11 +217,21 @@ mcp-armor sigstore rekor-lookup mcp-armor.sigstore.json   # requires --features 
 Policy file lives at `$XDG_CONFIG_HOME/mcp-armor/policy.toml` (or `~/.config/mcp-armor/policy.toml`). Override with `--policy /path/to/policy.toml` or env `MCP_ARMOR_POLICY`. Default policy:
 
 ```toml
-fail_mode      = "closed"      # block on verdict==block
-scan_unicode   = true
-allow_patterns = []            # pattern ids to never block
-allow_servers  = []            # server names that bypass the scanner
-version        = "default"
+fail_mode       = "closed"     # block on verdict==block
+scan_unicode    = true         # stage 3 (NFKC + zero-width + Bidi strip)
+scan_confusable = true         # stage 4 (v0.3: UTS-39 skeleton fold)
+allow_patterns  = []           # pattern ids to never block
+allow_servers   = []           # server names that bypass the scanner
+version         = "default"
+
+# v0.3 — loader-class env keys stripped from child on `wrap`. When
+# omitted, the 7-entry default applies. Empty list ([]) disables the
+# guard. Custom list REPLACES default (no merge).
+deny_env_keys = [
+    "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    "NODE_OPTIONS", "PYTHONPATH", "JAVA_TOOL_OPTIONS",
+]
 
 # v0.2 — per-tool allowlist (REVIEW.md F3 Sub-b mitigation).
 # Map tool_name -> [pattern_ids]. When a scanner match is on `tool_name`

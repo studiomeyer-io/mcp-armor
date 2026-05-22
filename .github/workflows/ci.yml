@@ -31,25 +31,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: fmt check
         run: cargo fmt --all --check
-      - name: clippy
-        # Avoid --all-features: that activates the reserved `sigstore-bridge`
-        # flag which is a v0.2 placeholder and intentionally fires
-        # `compile_error!` (see src/sigstore_bridge_stub.rs).
-        run: cargo clippy --all-targets --features audit-db -- -D warnings
-      - name: test (with audit-db)
-        run: cargo test --features audit-db --no-fail-fast
+
+      # v0.2 lifted the v0.1 `sigstore-bridge` compile_error! stub: the
+      # feature is now a real Rekor REST bridge + cosign bundle parser.
+      # v0.3 removed the empty `audit-db` flag (Lumina S982 anti-pattern,
+      # the feature only set up a dep that no code path used). It will
+      # come back in a future release with actual SQLite-backed history.
+      # `--all-features` is therefore safe to use directly now.
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: test (default features)
         run: cargo test --no-default-features --no-fail-fast
-      - name: verify sigstore-bridge stub still rejects build
-        run: |
-          if cargo check --features sigstore-bridge 2>/dev/null; then
-            echo "ERROR: sigstore-bridge feature compiled — compile_error! stub bypassed."
-            exit 1
-          else
-            echo "OK: sigstore-bridge stub correctly rejects build (v0.2 placeholder)."
-          fi
+      - name: test (otlp)
+        run: cargo test --features otlp --no-fail-fast
+      - name: test (sigstore-bridge)
+        run: cargo test --features sigstore-bridge --no-fail-fast
+      - name: test (rmcp-control)
+        run: cargo test --features rmcp-control --no-fail-fast
+      - name: test (all features)
+        run: cargo test --all-features --no-fail-fast
+
       - name: cve simulation
-        run: cargo test --features audit-db --test cve_simulation -- --nocapture
+        run: cargo test --test cve_simulation -- --nocapture
 
   bench:
     name: bench regression gate

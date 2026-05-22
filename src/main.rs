@@ -166,6 +166,25 @@ async fn main() -> Result<()> {
             let scanner = Arc::new(Scanner::new().context("build scanner")?);
             let (policy, policy_path) =
                 mcp_armor::policy::load_policy(cli.policy.as_deref()).context("load policy")?;
+
+            // v0.3 Sahnehaube A — startup advisory: surface to the operator
+            // exactly which loader-class env keys the current shell is
+            // leaking into the proxy process. The proxy itself will
+            // env_remove these from the *child* before spawn (defence
+            // applies regardless of this warning), but printing the leaks
+            // here gives the operator the chance to scrub their shell init
+            // so the keys never reach mcp-armor in the first place.
+            //
+            // R1-fix (Architect MED): use the public `Policy` method so
+            // the binary doesn't reach into crate-internal helpers.
+            let leaked = policy.leaked_loader_keys();
+            if !leaked.is_empty() {
+                tracing::warn!(
+                    leaked = ?leaked,
+                    "v0.3 Sahnehaube A: loader-class env keys present in operator shell — these will be stripped from the child but consider clearing them upstream"
+                );
+            }
+
             let handle = mcp_armor::policy::into_handle(policy);
             // v0.2 — install SIGHUP reload (Unix). Windows is a no-op.
             mcp_armor::policy::spawn_reload_task(handle.clone(), policy_path)

@@ -4,6 +4,136 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-22
+
+v0.3 ships three new defensive layers ("Sahnehauben" — cherry on top)
+on top of v0.2, all opt-out via policy.toml and all replicable for the
+StudioMeyer Rust security pillars (ai-shield, mcp-rce-guard,
+mcp-stdio-shellguard). Plus a documentation re-scoping of the v0.3
+Rekor v2 backlog (the previous "endpoint fallback" framing was wrong —
+v2 is a tiles-based transparency log, not a URL swap).
+
+### Pre-release security pass (3-agent code review, GO at round N — see commit log)
+
+A 3-agent code-review (Critic + Analyst + Research, parallel) was run
+before tagging. Findings + fixes documented at the bottom of this entry.
+
+### Added
+
+- **Sahnehaube A — loader-class env-key strip on `wrap`.** Closes the
+  Zealynx 2026 forensic side-channel where a registry-fetched MCP
+  manifest can specify `env: { LD_PRELOAD: "/evil.so" }` and bypass
+  the binary signature verify entirely (env injection is upstream of
+  `exec`). New policy field `deny_env_keys: Vec<String>` defaults to a
+  7-entry list covering glibc dynamic linker (`LD_PRELOAD`,
+  `LD_LIBRARY_PATH`), macOS dyld (`DYLD_INSERT_LIBRARIES`,
+  `DYLD_LIBRARY_PATH`), and language runtime injection (`NODE_OPTIONS`,
+  `PYTHONPATH`, `JAVA_TOOL_OPTIONS`). Set to `[]` to disable; custom
+  list REPLACES default (no merge). The `wrap` subcommand strips
+  matching keys from the child process env before spawn, and emits a
+  startup `warn!` listing exactly which keys the operator's shell was
+  leaking. Case-insensitive matching across Unix and Windows. Helper
+  `proxy::stdio::strip_loader_env_keys` is `pub` for downstream
+  integration (`ai-shield` reuse). Tests: 4 unit in policy/loader +
+  4 unit in proxy/stdio (with restore via `std::env::remove_var` so
+  test isolation is preserved).
+- **Sahnehaube B — UTS-39 confusable / homoglyph skeleton (Stage 4).**
+  Closes the Latin-lookalike evasion class that survives NFKC
+  byte-for-byte. New module `src/scanner/confusable.rs` ships a hand-
+  curated ~180-entry table covering Cyrillic (full upper/lower Latin-
+  lookalikes), Greek (capitals + lowercase), Cherokee (Latin-capital-
+  shaped letters — `Ꭺ`, `Ꭼ`, `Ꭿ`, `Ꮇ`, `Ꮖ`), Latin Extended-IPA
+  (`ɑ`, `ɡ`, `ı`, `ɩ`), Mathematical Alphanumeric belt-and-braces
+  (NFKC already folds these), and Armenian/Coptic/Glagolitic outliers.
+  New scanner stage `scan_with_opts(payload, scan_unicode,
+  scan_confusable)` re-runs Aho + Regex against the skeleton form
+  when `has_confusables(payload)` returns true. The `scan_with(payload,
+  scan_unicode)` 2-param API stays backward-compatible (Stage 4 on).
+  Gated by `policy.scan_confusable: bool` (default `true`). Cheap
+  ASCII-only fast-path keeps p99 budget intact. Tests: 11 unit in
+  scanner/confusable + 5 integration in scanner/mod against the
+  existing CVE feed pattern set.
+- **Sahnehaube C — Trust-Triade CI (supply-chain.yml + scorecard.yml +
+  deny.toml).** Three new CI jobs lift mcp-armor into the Tier where
+  Falco / Tetragon / sigstore live:
+  - `cargo cyclonedx --format json --all` emits a CycloneDX-1.5 SBOM
+    on every PR + main + weekly schedule. SBOM is uploaded as workflow
+    artifact (90-day retention) and consumed by the next job.
+  - `osv-scanner --sbom=bom.json --format sarif` runs Google's OSV
+    database (RustSec + GHSA + crates.io publisher advisories) against
+    the SBOM and uploads SARIF to the GitHub Security tab.
+  - `EmbarkStudios/cargo-deny-action@v2 check advisories bans sources
+    licenses` runs the four cargo-deny checks (advisory DB + ban list
+    + registry allowlist + license allowlist) on every PR + main +
+    weekly. Configured via top-level `deny.toml`.
+  - `ossf/scorecard-action@v2 publish_results: true` runs the 18-check
+    OpenSSF Scorecard suite weekly + on every push, uploads SARIF to
+    Security tab AND publishes the result to the Scorecard API so the
+    README badge renders.
+
+### Changed
+
+- **Scanner pipeline is now 4 stages** (was 3). The new Stage 4 is
+  gated separately from Stage 3 so operators can disable confusable-
+  folding without losing NFKC + Bidi + Zero-Width strip.
+- **`scan_with` signature is backward-compatible.** Calling
+  `scan_with(payload, scan_unicode)` continues to work; Stage 4 is on
+  by default. New `scan_with_opts(payload, scan_unicode,
+  scan_confusable)` exposes the third gate for proxy hot-path callers
+  that snapshot from `Policy`.
+- **`proxy::run_proxy` spawn pre-flight** now strips loader-class env
+  keys from the child `Command`. SIGHUP reload does NOT re-evaluate
+  this (env is a process-lifetime attribute); operators who flip
+  `deny_env_keys` mid-flight must restart the wrap. Documented in
+  rustdoc.
+- **README pipeline section** now documents 4 stages + the loader-class
+  env defence, with badges for crates.io + CI + supply-chain +
+  OpenSSF-Scorecard + License.
+- **CI workflow updated for v0.3 dep-tree.** Drops the v0.1.1-era
+  `audit-db` feature checks (the flag was removed in v0.2 as a Lumina
+  S982 empty-feature-flag fix) and the v0.1.x `sigstore-bridge`
+  compile_error stub check (the feature is now real). New per-feature
+  matrix runs `cargo test` against default, `otlp`, `sigstore-bridge`,
+  `rmcp-control`, and `--all-features` independently so a feature-
+  triggered breakage cannot hide behind another feature's tests. CI
+  bench gate retained.
+
+### v0.3 backlog re-scoping
+
+- **Rekor v2** was previously listed as "endpoint fallback". That
+  framing was wrong: Rekor v2 (sigstore/rekor-tiles) is a **tiles-
+  based transparency log** built on the C2SP checkpoint format,
+  NOT a URL swap. The v1 REST `/api/v1/log/entries/{uuid}` →
+  `Read::take(cap+1)` pattern we ship works against the v1 instance,
+  but the v2 endpoint serves Merkle-tree tiles at
+  `/api/v2/tile/{L}/x{NNN}/{NNN}.p/{W}` and signed checkpoints at
+  `/api/v2/checkpoint`. A v2 verifier is therefore a checkpoint-
+  consistency-proof + tile-fetch implementation, not a URL flip. Real
+  scope is closer to "small verifier rewrite". Backlog item is
+  retained but with corrected scope. See
+  https://github.com/sigstore/rekor-tiles for the protocol.
+
+### Other v0.3 backlog (carried forward unchanged from v0.2)
+
+- opentelemetry-otlp 0.27 → 0.32 (5 breaking releases; fixes known
+  shutdown-hang in `grpc-tonic` collector path).
+- rmcp 0.1.5 → 1.x official MCP Rust SDK migration.
+- MCP protocol-version `2025-06-18` → `2025-11-25`.
+- Hand-rolled SHA-256 → `sha2 = "0.10"` (Critic M3, ~150 LOC removal).
+- Parent-dir fsync after keystore rename.
+- Concurrent CLI `keystore pin` race (advisory `flock`).
+- Fulcio cert-chain verification (`--certificate-identity` +
+  `--certificate-oidc-issuer`).
+- `tracing-opentelemetry` auto-bridge.
+- Windows targets.
+
+### Tests
+
+Targeted gain from v0.3: +20 unit + 5 integration. Per-feature matrix
+in CI verifies each Cargo feature combo independently (default, otlp,
+sigstore-bridge, rmcp-control, all-features) so a feature-triggered
+regression cannot hide behind another feature's pass.
+
 ## [0.2.0] — 2026-05-20
 
 v0.2 closes every item that v0.1 explicitly carried on the "v0.2 backlog"
@@ -221,6 +351,19 @@ v0.3 work:
   (1 unit), proxy extract_tool_name (3 unit), control-plane new tools
   (3 unit). All four feature combinations build clean with
   `cargo clippy --all-targets -D warnings` and pass the full test suite.
+
+### Known limitations carried from v0.2
+
+- **`manifest::tofu::default_path_uses_xdg_data_home` test** uses
+  `std::env::set_var` / `remove_var` to manipulate `XDG_DATA_HOME` /
+  `HOME`. v0.3 removed all `set_var` calls from the Sahnehaube A test
+  surface (via the `Policy::leaked_loader_keys_from` dependency-injection
+  variant), but the TOFU test still relies on real env mutation. Pre-
+  existing from v0.2; R2 Analyst-MED finding. Fix in v0.3.1 by adding a
+  `tofu::default_path_from(home: Option<&Path>)` DI helper, mirroring
+  the Sahnehaube A pattern. Currently the test runs reliably because it
+  is the only one touching those keys, but `cargo test --jobs 1` would
+  be needed if a sibling test ever read the same keys.
 
 ### Known limitations (v0.3 backlog, documented openly)
 

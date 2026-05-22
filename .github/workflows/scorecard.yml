@@ -1,0 +1,62 @@
+name: scorecard
+
+# v0.3 Sahnehaube C — OpenSSF Scorecard automated security posture
+# assessment. Runs the 18-check Scorecard suite (Branch-Protection,
+# Code-Review, Dangerous-Workflow, Dependency-Update-Tool, License,
+# Maintained, Pinned-Dependencies, SAST, SBOM, Security-Policy,
+# Signed-Releases, Token-Permissions, Vulnerabilities, Webhooks, …)
+# and uploads results to both the GitHub Security tab (SARIF) and the
+# public Scorecard API (so the badge in README renders).
+#
+# Score visible at:
+#   https://scorecard.dev/viewer/?uri=github.com/studiomeyer-io/mcp-armor
+
+on:
+  branch_protection_rule:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '47 5 * * 0'   # Sundays 05:47 UTC
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: scorecard-analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # SARIF upload to Security tab
+      security-events: write
+      # Required for `publish_results: true` (OIDC -> Scorecard API)
+      id-token: write
+      contents: read
+      actions: read
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: run scorecard analysis
+        uses: ossf/scorecard-action@v2
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # `publish_results: true` is what makes the README badge work
+          # (otherwise it'd render a question-mark forever).
+          publish_results: true
+
+      - name: upload SARIF to security tab
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
+          category: scorecard
+
+      - name: upload raw artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 30

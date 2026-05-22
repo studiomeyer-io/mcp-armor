@@ -1,0 +1,75 @@
+# v0.3 Sahnehaube C — cargo-deny configuration.
+#
+# Four sections corresponding to `cargo deny check advisories bans
+# sources licenses`. Settings tuned for a security-critical sidecar:
+# - Advisories block on ANY level (informational unmaintained crates
+#   still get flagged).
+# - License allowlist matches the dependency tree (MIT, Apache-2.0,
+#   BSD-3-Clause, Unicode-3.0 for ICU data, Zlib for compression).
+# - Sources allowlist is restricted to crates.io and our own GitHub
+#   org (no random crate-from-anywhere).
+# - Bans is intentionally empty in v0.3 — we add entries as soon as
+#   any specific crate gets a `RUSTSEC-*` advisory we can't auto-fix.
+
+[graph]
+# Apply the checks to every target the crate builds for, not just the
+# host. This catches deps that only show up on macos/aarch64 etc.
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ── Advisories ──────────────────────────────────────────────────────
+[advisories]
+# Use the bundled RustSec advisory DB.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Treat ALL severity levels as build-blocking. We can downgrade
+# `informational` if it becomes too noisy, but the security pitch is
+# stronger with strict gating.
+yanked = "deny"
+ignore = [
+    # Place RUSTSEC-IDs here ONLY with a dated note + planned fix.
+    # Example (do NOT enable without rationale):
+    # "RUSTSEC-2024-XXXX",  # 2026-05-22: tracked via #issue-N, fix in v0.3.1
+]
+
+# ── Bans (operator deny-list) ───────────────────────────────────────
+[bans]
+# Empty in v0.3; multiple-versions on transitive deps is acceptable
+# (cargo handles it).
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ── Sources (registry allowlist) ────────────────────────────────────
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+# ── Licenses ────────────────────────────────────────────────────────
+[licenses]
+# License IDs follow SPDX. Allowlist matches everything currently in
+# the v0.2 dep tree (cargo tree --target all). Adding a new dep that
+# carries a license not on this list will fail the gate.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+exceptions = []

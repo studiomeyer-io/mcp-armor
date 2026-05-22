@@ -69,12 +69,33 @@ pub async fn run_proxy(
     policy: PolicyHandle,
     history: Arc<ScanHistory>,
 ) -> Result<(), ArmorError> {
-    let mut child: Child = Command::new(program)
-        .args(args)
+    // v0.3 Sahnehaube A — strip loader-class env keys from the child
+    // process before spawn. Closes the Zealynx 2026 side-channel where a
+    // registry-fetched MCP manifest can specify
+    // `env: { LD_PRELOAD: "/evil.so" }` and bypass the binary signature
+    // verify entirely (env injection is upstream of `exec`).
+    //
+    // We snapshot the policy once here at spawn-time. Re-evaluation on
+    // SIGHUP reload is intentionally NOT done — env is a process-lifetime
+    // attribute that cannot be changed after spawn. Operators who flip
+    // `deny_env_keys` mid-flight should restart the wrap.
+    let stripped_env_keys = snapshot(&policy).leaked_loader_keys();
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
+        .stderr(std::process::Stdio::inherit());
+    for key in &stripped_env_keys {
+        cmd.env_remove(key);
+    }
+    if !stripped_env_keys.is_empty() {
+        tracing::warn!(
+            stripped = ?stripped_env_keys,
+            program = program,
+            "v0.3 Sahnehaube A: stripped loader-class env keys from child process before spawn — set policy.deny_env_keys=[] to disable"
+        );
+    }
+    let mut child: Child = cmd.spawn()?;
 
     let mut child_stdin = child
         .stdin
@@ -147,7 +168,13 @@ pub async fn run_proxy(
             }
 
             let scan_target = extract_scan_target(&envelope);
-            let result = scanner_in.scan_with(&scan_target, pol.scan_unicode);
+            // v0.3 R1-CRIT fix: thread `pol.scan_confusable` through so the
+            // operator's policy.toml toggle is actually honoured. Before
+            // this fix, `scan_with(payload, scan_unicode)` hard-coded
+            // Stage 4 = on (`scan_confusable=true`) and the new
+            // `policy.scan_confusable` field was a dead knob.
+            let result =
+                scanner_in.scan_with_opts(&scan_target, pol.scan_unicode, pol.scan_confusable);
             let tool_name = extract_tool_name(&envelope);
 
             let allow_pattern_global = !result.matched_patterns.is_empty()
@@ -232,7 +259,10 @@ pub async fn run_proxy(
                 // Round 1 M4 fix: outbound also re-evaluates allow_servers
                 // per-line so SIGHUP reloads are honoured symmetrically.
                 if !server_is_allowlisted(&program_for_out, &pol.allow_servers) {
-                    let result: ScanResult = scanner_out.scan_with(trimmed, pol.scan_unicode);
+                    // v0.3 R1-CRIT fix: thread `pol.scan_confusable` —
+                    // see inbound-handler comment above for rationale.
+                    let result: ScanResult =
+                        scanner_out.scan_with_opts(trimmed, pol.scan_unicode, pol.scan_confusable);
                     if !result.matched_patterns.is_empty() {
                         // Note (Analyst observation 7): outbound intentionally
                         // applies only the *global* allow_patterns — never the
@@ -302,6 +332,14 @@ fn extract_tool_name(envelope: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
 }
+
+// v0.3 Sahnehaube A — env-key strip lives on `Policy::leaked_loader_keys`
+// (see `src/policy/loader.rs`). The proxy hot-path calls
+// `snapshot(&policy).leaked_loader_keys()` at spawn-time and feeds the
+// result into `cmd.env_remove(key)` for each match. R1-fix (Architect MED):
+// the helper was originally a stand-alone `pub(crate)` function here, but
+// the binary (`src/main.rs`, separate compilation unit) needs it for the
+// startup-warn, so it's now a `Policy` method.
 
 /// Pluck the part of the envelope worth scanning. Concretely:
 /// `params.arguments` plus the `params.name` (tool name). Keeps payload

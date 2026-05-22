@@ -201,9 +201,12 @@ fn tool_scan_payload(
             "direction must be inbound|outbound, got {direction}"
         )));
     }
-    // Honour the policy.scan_unicode toggle here too — the control-plane
-    // scan_payload tool is meant to mirror what the proxy hot-path does.
-    let result = scanner.scan_with(payload, policy.scan_unicode);
+    // Honour the policy toggles here too — the control-plane scan_payload
+    // tool is meant to mirror what the proxy hot-path does. v0.3 R1-CRIT
+    // fix: previously called the v0.2 `scan_with(payload, scan_unicode)`
+    // which hard-codes `scan_confusable=true`, leaving `policy.scan_confusable`
+    // as a dead toggle. Now uses `scan_with_opts` to wire both gates.
+    let result = scanner.scan_with_opts(payload, policy.scan_unicode, policy.scan_confusable);
     // P2 fix (S983): only record actual blocks to the audit ring buffer —
     // the buffer is named "blocked tool calls" in `armor_list_blocked`.
     // Recording every Allow scan would inflate the ring + flood the tool

@@ -1,10 +1,10 @@
 [package]
 name = "mcp-armor"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection, validates Ed25519 manifest signatures with TOFU keystore + optional Sigstore Rekor bridge, exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
+description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"
 homepage = "https://github.com/studiomeyer-io/mcp-armor"
 authors = ["Matthias Meyer (StudioMeyer) <hi@studiomeyer.io>"]
@@ -21,7 +21,7 @@ name = "mcp-armor"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.52", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process", "time", "sync", "signal"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process", "time", "sync", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"

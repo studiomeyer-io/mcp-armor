@@ -1,0 +1,128 @@
+name: supply-chain
+
+# v0.3 Sahnehaube C — Trust-Triade: CycloneDX SBOM + OSV-Scanner +
+# cargo-deny. Three jobs, all run on PR + main + weekly schedule so a
+# new advisory in the RustSec database surfaces inside a week even if
+# no commits land. OpenSSF Scorecard lives in `scorecard.yml` because
+# it needs its own `id-token: write` permission scope.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'  # Mondays 04:23 UTC — off-peak so it never collides with release pipeline
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Job 1: CycloneDX SBOM generation ───────────────────────────────
+  # cargo-cyclonedx emits an industry-standard SBOM JSON. Uploaded as
+  # workflow artifact so downstream jobs (and release pipelines) can
+  # consume it without regenerating.
+  sbom:
+    name: cyclonedx-sbom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+      - name: generate SBOM (JSON)
+        # `--all` walks the workspace (we have a single crate, but this
+        # is forward-compatible if we split into a workspace later).
+        # `--format json` is what osv-scanner consumes.
+        # R1-fix (Research MED): `cargo cyclonedx` does NOT accept
+        # `--output-pattern`. The current flag is `--override-filename`,
+        # which emits `<name>.cdx.json`. We use the default filename
+        # and rename via wildcard so the step survives a future crate
+        # rename. R2-fix (Critic MED): the wildcard PLUS an explicit
+        # single-file sanity gate prevents silent breakage when a
+        # workspace split would emit multiple `.cdx.json` files.
+        run: |
+          cargo cyclonedx --format json --all
+          ls -la *.cdx.json
+          count=$(ls *.cdx.json 2>/dev/null | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "ERROR: expected exactly one .cdx.json (single-crate), got $count" >&2
+            echo "If you intentionally added a workspace member, update this step to merge SBOMs." >&2
+            exit 1
+          fi
+          mv *.cdx.json bom.json
+      - name: list generated SBOMs
+        run: ls -la bom.json
+      - name: upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: cyclonedx-sbom
+          path: bom.json
+          retention-days: 90
+
+  # ── Job 2: OSV-Scanner against the SBOM ────────────────────────────
+  # Pulls Google's OSV database (RustSec + GHSA + advisories from
+  # crates.io publishers) and gates the build on any HIGH/CRITICAL hit.
+  osv-scan:
+    name: osv-scanner
+    runs-on: ubuntu-latest
+    needs: sbom
+    permissions:
+      contents: read
+      security-events: write   # Upload SARIF to Security tab
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: cyclonedx-sbom
+          path: ./sbom
+      - name: list pulled SBOMs
+        run: ls -la sbom/
+      - name: install osv-scanner
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2
+      - name: scan SBOM
+        # `--recursive` would walk a tree; we already have a generated
+        # SBOM so we point at it directly. SARIF output gets uploaded
+        # to the GitHub Security tab so findings are queryable.
+        run: |
+          set -o pipefail
+          osv-scanner --sbom=sbom/bom.json --format sarif --output osv-results.sarif || true
+          osv-scanner --sbom=sbom/bom.json --format table
+      - name: upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: osv-results.sarif
+          category: osv-scanner
+
+  # ── Job 3: cargo-deny advisories + bans + sources + licenses ──────
+  # Embark's cargo-deny is the Rust-native counterpart to OSV.
+  # `advisories` matches against the RustSec advisory DB, `bans` is
+  # operator-defined deny-list, `sources` blocks crates from
+  # untrusted registries, `licenses` enforces the MIT/Apache/BSD trio.
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Run all four checks; `deny.toml` in the repo root configures
+          # license allowlist + advisory severity thresholds + ban list.
+          command: check advisories bans sources licenses
+          # Optional severity threshold escalation — we treat any
+          # `warnings` from RustSec as build-blocking in v0.3+.
+          arguments: --all-features

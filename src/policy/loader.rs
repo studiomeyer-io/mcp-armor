@@ -12,6 +12,33 @@ pub enum FailMode {
     Closed,
 }
 
+/// Default set of environment-variable keys that are stripped from the
+/// upstream child process on `mcp-armor wrap`. v0.3 Sahnehaube A
+/// (Zealynx forensic 2026 — registry-fetched MCP manifests can specify
+/// `env:` for spawn, and these keys are *code-loaders* that allow
+/// transparent RCE without touching the binary signature).
+///
+/// All seven defaults belong to one of three loader-class side channels:
+/// - **Dynamic linker hijack:** `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+///   `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` (macOS analogue).
+/// - **Language runtime hijack:** `NODE_OPTIONS` (Node `--require`),
+///   `PYTHONPATH` (Python `sys.path` prepend), `JAVA_TOOL_OPTIONS`
+///   (JVM startup flags).
+///
+/// Operators may extend or override via `policy.deny_env_keys`. Keys are
+/// matched case-insensitively on Unix (`LD_PRELOAD`/`ld_preload` both
+/// caught) and case-insensitively on Windows (where env names are
+/// case-insensitive at the OS level anyway).
+pub const DEFAULT_DENY_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "NODE_OPTIONS",
+    "PYTHONPATH",
+    "JAVA_TOOL_OPTIONS",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     pub fail_mode: FailMode,
@@ -32,7 +59,41 @@ pub struct Policy {
     /// arguments because it is a code-interpreter".
     #[serde(default)]
     pub allow_patterns_per_tool: BTreeMap<String, Vec<String>>,
+    /// v0.3 Sahnehaube A — environment-variable keys to STRIP from the
+    /// child process env on `mcp-armor wrap`. Closes the Zealynx
+    /// stdio-config side-channel where a registry-fetched MCP manifest
+    /// can specify `env: { LD_PRELOAD: "/evil.so" }` and bypass the
+    /// binary signature verify entirely (the env injection is upstream
+    /// of `exec`).
+    ///
+    /// When omitted, [`DEFAULT_DENY_ENV_KEYS`] applies (7 loader-class
+    /// keys covering glibc dynamic linker, macOS dyld, Node/Python/JVM
+    /// runtime injection). Setting it to `[]` *disables* the guard;
+    /// setting it to a custom list *replaces* the default (no merge).
+    ///
+    /// Scan is case-insensitive (`LD_PRELOAD`/`ld_preload` both caught).
+    #[serde(default = "default_deny_env_keys")]
+    pub deny_env_keys: Vec<String>,
+    /// v0.3 Sahnehaube B — enable Stage 4 confusable / homoglyph
+    /// detection in the scanner. When `true`, the scanner builds a
+    /// Unicode UTS-39 skeleton from the payload and re-runs the
+    /// pattern stages against the skeleton form. Catches
+    /// Cherokee/Cyrillic/Greek homoglyph evasions (`іgnоre` with
+    /// Cyrillic i/o vs. ASCII `ignore`). Default: `true`.
+    #[serde(default = "default_scan_confusable")]
+    pub scan_confusable: bool,
     pub version: String,
+}
+
+fn default_deny_env_keys() -> Vec<String> {
+    DEFAULT_DENY_ENV_KEYS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+fn default_scan_confusable() -> bool {
+    true
 }
 
 impl Default for Policy {
@@ -43,8 +104,59 @@ impl Default for Policy {
             allow_patterns: Vec::new(),
             allow_servers: Vec::new(),
             allow_patterns_per_tool: BTreeMap::new(),
+            deny_env_keys: default_deny_env_keys(),
+            scan_confusable: true,
             version: "default".to_string(),
         }
+    }
+}
+
+impl Policy {
+    /// v0.3 Sahnehaube A — case-insensitive membership test against
+    /// `deny_env_keys`. Returns `true` when `env_key` should be stripped
+    /// from the child process env (or, on the operator side, warned about
+    /// when present in the current process env at wrap startup).
+    pub fn env_key_is_denied(&self, env_key: &str) -> bool {
+        self.deny_env_keys
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(env_key))
+    }
+
+    /// v0.3 Sahnehaube A — sorted, deduplicated subset of the CURRENT
+    /// process environment keys that match `deny_env_keys`. Used by the
+    /// operator-facing `Cmd::Wrap` startup-warn to surface exactly which
+    /// loader-class env keys the operator's shell is leaking into the
+    /// sidecar (the child-side strip happens regardless in `run_proxy`).
+    ///
+    /// R1-fix (Architect MED): exposed as a `Policy` method so the
+    /// binary (`src/main.rs`, separate compilation unit) can read it
+    /// through the public API without needing crate-internal helpers.
+    /// Snapshots `std::env::vars_os()` once at call time.
+    #[must_use]
+    pub fn leaked_loader_keys(&self) -> Vec<String> {
+        self.leaked_loader_keys_from(std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()))
+    }
+
+    /// v0.3 R1-fix — dependency-injection variant of
+    /// [`Policy::leaked_loader_keys`]. Takes the env-key list as an
+    /// iterator so tests don't have to mutate the actual process
+    /// environment (data-race trap under multi-threaded `cargo test`).
+    #[must_use]
+    pub fn leaked_loader_keys_from<I>(&self, env_keys: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        if self.deny_env_keys.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Vec::new();
+        for env_key in env_keys {
+            if self.env_key_is_denied(&env_key) && !out.contains(&env_key) {
+                out.push(env_key);
+            }
+        }
+        out.sort();
+        out
     }
 }
 
@@ -220,6 +332,104 @@ version = "per-tool-1"
                 "javascript_uri".to_string()
             ]
         ));
+    }
+
+    /// v0.3 Sahnehaube A — default policy denies the 7 loader-class env keys.
+    #[test]
+    fn default_policy_denies_loader_env_keys() {
+        let p = Policy::default();
+        for k in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "JAVA_TOOL_OPTIONS",
+        ] {
+            assert!(p.env_key_is_denied(k), "default policy must deny {k}");
+        }
+    }
+
+    /// v0.3 Sahnehaube A — case-insensitive match for env keys.
+    #[test]
+    fn env_key_deny_is_case_insensitive() {
+        let p = Policy::default();
+        assert!(p.env_key_is_denied("ld_preload"));
+        assert!(p.env_key_is_denied("Ld_PreLoad"));
+        assert!(p.env_key_is_denied("LD_PRELOAD"));
+        assert!(!p.env_key_is_denied("PATH"));
+        assert!(!p.env_key_is_denied("HOME"));
+    }
+
+    /// v0.3 Sahnehaube A — empty deny_env_keys disables the guard.
+    #[test]
+    fn empty_deny_env_keys_disables_guard() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+deny_env_keys = []
+version = "no-env-guard"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(!pol.env_key_is_denied("LD_PRELOAD"));
+        assert!(pol.deny_env_keys.is_empty());
+    }
+
+    /// v0.3 Sahnehaube A — custom deny_env_keys REPLACES the default.
+    #[test]
+    fn custom_deny_env_keys_replaces_default() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+deny_env_keys = ["MY_CUSTOM_LOADER"]
+version = "custom-env-guard"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(pol.env_key_is_denied("MY_CUSTOM_LOADER"));
+        assert!(
+            !pol.env_key_is_denied("LD_PRELOAD"),
+            "custom list must REPLACE default, not merge"
+        );
+        assert_eq!(pol.deny_env_keys, vec!["MY_CUSTOM_LOADER".to_string()]);
+    }
+
+    /// v0.3 Sahnehaube B — scan_confusable defaults to true (opt-out, not opt-in).
+    #[test]
+    fn scan_confusable_defaults_to_true() {
+        let p = Policy::default();
+        assert!(p.scan_confusable);
+    }
+
+    /// v0.3 Sahnehaube B — policy file can disable Stage 4.
+    #[test]
+    fn scan_confusable_can_be_disabled_via_toml() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+scan_confusable = false
+version = "no-confusable"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(!pol.scan_confusable);
     }
 
     /// v0.2 — file mode advisory: load_policy must NOT refuse a 0o644 file,
