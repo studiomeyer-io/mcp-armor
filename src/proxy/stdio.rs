@@ -69,7 +69,7 @@ pub async fn run_proxy(
     policy: PolicyHandle,
     history: Arc<ScanHistory>,
 ) -> Result<(), ArmorError> {
-    // v0.3 Sahnehaube A — strip loader-class env keys from the child
+    // v0.3 Feature A — strip loader-class env keys from the child
     // process before spawn. Closes the Zealynx 2026 side-channel where a
     // registry-fetched MCP manifest can specify
     // `env: { LD_PRELOAD: "/evil.so" }` and bypass the binary signature
@@ -92,7 +92,7 @@ pub async fn run_proxy(
         tracing::warn!(
             stripped = ?stripped_env_keys,
             program = program,
-            "v0.3 Sahnehaube A: stripped loader-class env keys from child process before spawn — set policy.deny_env_keys=[] to disable"
+            "v0.3 Feature A: stripped loader-class env keys from child process before spawn — set policy.deny_env_keys=[] to disable"
         );
     }
     let mut child: Child = cmd.spawn()?;
@@ -333,7 +333,7 @@ fn extract_tool_name(envelope: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-// v0.3 Sahnehaube A — env-key strip lives on `Policy::leaked_loader_keys`
+// v0.3 Feature A — env-key strip lives on `Policy::leaked_loader_keys`
 // (see `src/policy/loader.rs`). The proxy hot-path calls
 // `snapshot(&policy).leaked_loader_keys()` at spawn-time and feeds the
 // result into `cmd.env_remove(key)` for each match. R1-fix (Architect MED):

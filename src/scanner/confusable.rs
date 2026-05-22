@@ -1,4 +1,4 @@
-//! v0.3 Sahnehaube B — Unicode confusable / homoglyph skeleton.
+//! v0.3 Feature B — Unicode confusable / homoglyph skeleton.
 //!
 //! The Stage-3 NFKC pass folds *width* (`ｓｕｄｏ` → `sudo`) and *legacy
 //! compatibility forms* (`Ⅹ` → `X`), but does **not** fold Cyrillic /

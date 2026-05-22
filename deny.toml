@@ -1,4 +1,4 @@
-# v0.3 Sahnehaube C — cargo-deny configuration.
+# v0.3 Feature C — cargo-deny configuration.
 #
 # Four sections corresponding to `cargo deny check advisories bans
 # sources licenses`. Settings tuned for a security-critical sidecar:

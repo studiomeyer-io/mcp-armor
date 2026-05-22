@@ -1,6 +1,6 @@
 name: supply-chain
 
-# v0.3 Sahnehaube C — Trust-Triade: CycloneDX SBOM + OSV-Scanner +
+# v0.3 Feature C — Trust-Triade: CycloneDX SBOM + OSV-Scanner +
 # cargo-deny. Three jobs, all run on PR + main + weekly schedule so a
 # new advisory in the RustSec database surfaces inside a week even if
 # no commits land. OpenSSF Scorecard lives in `scorecard.yml` because

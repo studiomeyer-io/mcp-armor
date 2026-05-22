@@ -115,7 +115,7 @@ impl Scanner {
     ///   1 + 2 against the stripped form. Catches zero-width / Bidi /
     ///   fullwidth evasions. Gated on `scan_unicode`.
     /// - **Stage 4 (Confusable / Homoglyph skeleton)** — *new in v0.3
-    ///   Sahnehaube B*. Builds the UTS-39 skeleton of the (stage-3-
+    ///   Feature B*. Builds the UTS-39 skeleton of the (stage-3-
     ///   normalised when available, otherwise raw) input — folding
     ///   Cyrillic/Greek/Cherokee/Latin-Extended lookalikes back to their
     ///   ASCII form — and re-runs 1 + 2 against the skeleton. Catches
@@ -169,7 +169,7 @@ impl Scanner {
             None
         };
 
-        // Stage 4 (v0.3 Sahnehaube B): UTS-39 confusable skeleton re-scan.
+        // Stage 4 (v0.3 Feature B): UTS-39 confusable skeleton re-scan.
         // Closes the homoglyph evasion class (Cyrillic / Greek / Cherokee /
         // Latin-Extended lookalikes that survive NFKC byte-for-byte).
         if scan_confusable {
@@ -353,7 +353,7 @@ mod tests {
         );
     }
 
-    /// v0.3 Sahnehaube B — Stage 4 catches Cyrillic-homoglyph evasion that
+    /// v0.3 Feature B — Stage 4 catches Cyrillic-homoglyph evasion that
     /// survives NFKC byte-for-byte.
     #[test]
     fn cyrillic_homoglyph_blocks_via_stage4() {
@@ -372,7 +372,7 @@ mod tests {
         );
     }
 
-    /// v0.3 Sahnehaube B — Stage 4 OFF must skip confusable folding even
+    /// v0.3 Feature B — Stage 4 OFF must skip confusable folding even
     /// when payload contains Cyrillic look-alikes.
     #[test]
     fn scan_confusable_false_skips_stage4() {
@@ -394,7 +394,7 @@ mod tests {
         );
     }
 
-    /// v0.3 Sahnehaube B — Cherokee Latin-capital-shaped letters fold
+    /// v0.3 Feature B — Cherokee Latin-capital-shaped letters fold
     /// correctly via Stage 4.
     #[test]
     fn cherokee_homoglyph_blocks_via_stage4() {
@@ -407,7 +407,7 @@ mod tests {
         assert_eq!(r.verdict, ScanVerdict::Block);
     }
 
-    /// v0.3 Sahnehaube B — combined evasion (zero-width + Cyrillic).
+    /// v0.3 Feature B — combined evasion (zero-width + Cyrillic).
     /// Stage-3 strips zero-width, Stage-4 folds Cyrillic — combined hit.
     #[test]
     fn combined_zerowidth_plus_cyrillic_blocks() {
@@ -423,7 +423,7 @@ mod tests {
         );
     }
 
-    /// v0.3 Sahnehaube B — Stage 4 backward-compat default for `scan_with`:
+    /// v0.3 Feature B — Stage 4 backward-compat default for `scan_with`:
     /// calling the 2-param API behaves as if Stage 4 were on. This is the
     /// invariant the deprecation shim guarantees until v0.4 removes it.
     /// `#[allow(deprecated)]` is intentional — this test EXISTS to pin the

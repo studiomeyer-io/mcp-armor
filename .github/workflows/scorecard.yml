@@ -1,6 +1,6 @@
 name: scorecard
 
-# v0.3 Sahnehaube C — OpenSSF Scorecard automated security posture
+# v0.3 Feature C — OpenSSF Scorecard automated security posture
 # assessment. Runs the 18-check Scorecard suite (Branch-Protection,
 # Code-Review, Dangerous-Workflow, Dependency-Update-Tool, License,
 # Maintained, Pinned-Dependencies, SAST, SBOM, Security-Policy,

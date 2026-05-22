@@ -10,7 +10,7 @@ Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt inje
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
-mcp-armor sits between an MCP client (Claude Desktop, Windsurf, Cursor) and an upstream server. JSON-RPC traffic flows through a three-stage scanner (Aho-Corasick prefilter → regex stage → NFKC + zero-width strip + tag-unicode strip → re-scan), block decisions are recorded to an in-memory ring buffer, and the read-only control-plane MCP server surfaces the audit history back to the client.
+mcp-armor sits between an MCP client (Claude Desktop, Windsurf, Cursor) and an upstream server. JSON-RPC traffic flows through a **four-stage scanner** (Aho-Corasick prefilter → regex stage → NFKC + zero-width + Bidi + tag-unicode strip → re-scan → UTS-39 confusable skeleton fold → re-scan). Block decisions are recorded to an in-memory ring buffer, and the read-only control-plane MCP server surfaces the audit history back to the client. On `wrap`, loader-class env keys (`LD_PRELOAD`, `NODE_OPTIONS`, `PYTHONPATH`, …) are stripped from the child process before `spawn()`.
 
 Sister project: [studiomeyer-io/ai-shield](https://github.com/studiomeyer-io/ai-shield) — TypeScript policy engine that mcp-armor's evasion patterns are ported from (Round 4 zero-width + tag-unicode work).
 
@@ -46,9 +46,14 @@ cargo install mcp-armor --features otlp
 # with online Sigstore Rekor lookup
 cargo install mcp-armor --features sigstore-bridge
 
-# full surface (otlp + sigstore-bridge + rmcp-control + audit-db)
-cargo install mcp-armor --features 'otlp sigstore-bridge rmcp-control audit-db'
+# full surface (otlp + sigstore-bridge + rmcp-control)
+cargo install mcp-armor --features 'otlp sigstore-bridge rmcp-control'
 ```
+
+> Note: the `audit-db` feature flag was removed in v0.2.0 (a Lumina-class
+> empty flag that pulled `rusqlite` into the dep graph but was never wired
+> into any code path). It will return in a future release alongside the
+> actual SQLite-backed `ScanHistory` implementation.
 
 MSRV: **Rust 1.85** (bumped from 1.75 in v0.1.1 — transitive deps now require `edition = "2024"`).
 
@@ -257,29 +262,34 @@ cargo test --all-features
 cargo bench --bench scanner
 ```
 
-130 tests pass on the default build, 117–118 with each individual feature combination (see CHANGELOG v0.2.0 "Tests").
+164 tests pass on the default build (133 lib + 31 integration), 163 with `--all-features` (one `cfg(not(feature = "sigstore-bridge"))` test correctly skipped). Per-feature breakdown in CHANGELOG v0.3.0 "Tests".
 
 ## Status
 
-**v0.2.x — early production.** The scanner pipeline, Ed25519 verify, TOFU keystore, Sigstore bundle parser, OTLP exporter, and the 9-tool control-plane are all stable enough for daily use as a stdio sidecar in front of trusted MCP servers. v0.3 backlog items are documented openly in CHANGELOG.
+**v0.3.x — early production.** The four-stage scanner, Ed25519 verify, TOFU keystore, Sigstore bundle parser, OTLP exporter, the 9-tool control-plane, loader-class env-key strip, and UTS-39 confusable defence are all stable enough for daily use as a stdio sidecar in front of trusted MCP servers. v0.3 backlog items are documented openly in CHANGELOG.
 
 | Area | Status |
 |---|---|
-| stdio proxy + scanner pipeline | shipped, p99 < 5 ms enforced in CI |
+| stdio proxy + scanner pipeline (4 stages) | shipped, p99 < 5 ms enforced in CI |
 | Ed25519 manifest verify (stateless) | shipped |
-| TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | **shipped in v0.2** |
-| Sigstore bundle parser + structural Rekor SET verify | **shipped in v0.2** (offline, always available) |
-| Sigstore Rekor REST lookup-by-hash | **shipped in v0.2** behind `--features sigstore-bridge` |
-| OTLP gRPC export (BatchSpanProcessor::Tokio) | **shipped in v0.2** behind `--features otlp` |
-| rmcp control-plane (minimal `ServerHandler`) | **shipped in v0.2** behind `--features rmcp-control` |
-| Per-tool pattern allowlist | **shipped in v0.2** |
-| SIGHUP policy reload (Unix) | **shipped in v0.2** |
-| `armor_check_cve` semver-range matching | **shipped in v0.2** |
-| Fulcio cert-chain verification | v0.3 backlog |
-| rmcp `#[tool_router]` macro path | v0.3 backlog — awaits rmcp 0.2.x feature stabilisation |
-| Windows targets | v0.3 backlog — Linux + macOS only |
-| `tracing-opentelemetry` auto-bridge | v0.3 backlog |
-| mTLS client cert for OTLP gRPC | v0.3 backlog |
+| TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | shipped in v0.2 |
+| Sigstore bundle parser + structural Rekor SET verify | shipped in v0.2 (offline, always available) |
+| Sigstore Rekor REST lookup-by-hash | shipped in v0.2 behind `--features sigstore-bridge` |
+| OTLP gRPC export (BatchSpanProcessor::Tokio) | shipped in v0.2 behind `--features otlp` |
+| rmcp control-plane (minimal `ServerHandler`) | shipped in v0.2 behind `--features rmcp-control` |
+| Per-tool pattern allowlist | shipped in v0.2 |
+| SIGHUP policy reload (Unix) | shipped in v0.2 |
+| `armor_check_cve` semver-range matching | shipped in v0.2 |
+| **Loader-class env-key strip on `wrap`** | **shipped in v0.3** |
+| **UTS-39 confusable skeleton (Stage 4)** | **shipped in v0.3** |
+| **Supply-chain CI (CycloneDX SBOM + OSV + cargo-deny + Scorecard)** | **shipped in v0.3** |
+| Fulcio cert-chain verification | v0.4 backlog |
+| Rekor v2 tiles-based verifier (consistency-proof + `/api/v2/tile/…`) | v0.4 backlog (re-scoped from v0.3 — see CHANGELOG) |
+| rmcp `#[tool_router]` macro path | v0.4 backlog — awaits rmcp 1.x stable on crates.io |
+| Windows targets | v0.4 backlog — Linux + macOS only |
+| `tracing-opentelemetry` auto-bridge | v0.4 backlog |
+| mTLS client cert for OTLP gRPC | v0.4 backlog |
+| Hand-rolled SHA-256 → `sha2 = "0.10"` | v0.4 backlog |
 
 Security disclosure policy: [SECURITY.md](SECURITY.md). Contributing
 guide: [CONTRIBUTING.md](CONTRIBUTING.md).

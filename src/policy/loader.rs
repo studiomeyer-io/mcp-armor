@@ -13,7 +13,7 @@ pub enum FailMode {
 }
 
 /// Default set of environment-variable keys that are stripped from the
-/// upstream child process on `mcp-armor wrap`. v0.3 Sahnehaube A
+/// upstream child process on `mcp-armor wrap`. v0.3 Feature A
 /// (Zealynx forensic 2026 — registry-fetched MCP manifests can specify
 /// `env:` for spawn, and these keys are *code-loaders* that allow
 /// transparent RCE without touching the binary signature).
@@ -59,7 +59,7 @@ pub struct Policy {
     /// arguments because it is a code-interpreter".
     #[serde(default)]
     pub allow_patterns_per_tool: BTreeMap<String, Vec<String>>,
-    /// v0.3 Sahnehaube A — environment-variable keys to STRIP from the
+    /// v0.3 Feature A — environment-variable keys to STRIP from the
     /// child process env on `mcp-armor wrap`. Closes the Zealynx
     /// stdio-config side-channel where a registry-fetched MCP manifest
     /// can specify `env: { LD_PRELOAD: "/evil.so" }` and bypass the
@@ -74,7 +74,7 @@ pub struct Policy {
     /// Scan is case-insensitive (`LD_PRELOAD`/`ld_preload` both caught).
     #[serde(default = "default_deny_env_keys")]
     pub deny_env_keys: Vec<String>,
-    /// v0.3 Sahnehaube B — enable Stage 4 confusable / homoglyph
+    /// v0.3 Feature B — enable Stage 4 confusable / homoglyph
     /// detection in the scanner. When `true`, the scanner builds a
     /// Unicode UTS-39 skeleton from the payload and re-runs the
     /// pattern stages against the skeleton form. Catches
@@ -112,7 +112,7 @@ impl Default for Policy {
 }
 
 impl Policy {
-    /// v0.3 Sahnehaube A — case-insensitive membership test against
+    /// v0.3 Feature A — case-insensitive membership test against
     /// `deny_env_keys`. Returns `true` when `env_key` should be stripped
     /// from the child process env (or, on the operator side, warned about
     /// when present in the current process env at wrap startup).
@@ -122,7 +122,7 @@ impl Policy {
             .any(|k| k.eq_ignore_ascii_case(env_key))
     }
 
-    /// v0.3 Sahnehaube A — sorted, deduplicated subset of the CURRENT
+    /// v0.3 Feature A — sorted, deduplicated subset of the CURRENT
     /// process environment keys that match `deny_env_keys`. Used by the
     /// operator-facing `Cmd::Wrap` startup-warn to surface exactly which
     /// loader-class env keys the operator's shell is leaking into the
@@ -334,7 +334,7 @@ version = "per-tool-1"
         ));
     }
 
-    /// v0.3 Sahnehaube A — default policy denies the 7 loader-class env keys.
+    /// v0.3 Feature A — default policy denies the 7 loader-class env keys.
     #[test]
     fn default_policy_denies_loader_env_keys() {
         let p = Policy::default();
@@ -351,7 +351,7 @@ version = "per-tool-1"
         }
     }
 
-    /// v0.3 Sahnehaube A — case-insensitive match for env keys.
+    /// v0.3 Feature A — case-insensitive match for env keys.
     #[test]
     fn env_key_deny_is_case_insensitive() {
         let p = Policy::default();
@@ -362,7 +362,7 @@ version = "per-tool-1"
         assert!(!p.env_key_is_denied("HOME"));
     }
 
-    /// v0.3 Sahnehaube A — empty deny_env_keys disables the guard.
+    /// v0.3 Feature A — empty deny_env_keys disables the guard.
     #[test]
     fn empty_deny_env_keys_disables_guard() {
         let dir = tempdir().expect("tmp");
@@ -382,7 +382,7 @@ version = "no-env-guard"
         assert!(pol.deny_env_keys.is_empty());
     }
 
-    /// v0.3 Sahnehaube A — custom deny_env_keys REPLACES the default.
+    /// v0.3 Feature A — custom deny_env_keys REPLACES the default.
     #[test]
     fn custom_deny_env_keys_replaces_default() {
         let dir = tempdir().expect("tmp");
@@ -406,14 +406,14 @@ version = "custom-env-guard"
         assert_eq!(pol.deny_env_keys, vec!["MY_CUSTOM_LOADER".to_string()]);
     }
 
-    /// v0.3 Sahnehaube B — scan_confusable defaults to true (opt-out, not opt-in).
+    /// v0.3 Feature B — scan_confusable defaults to true (opt-out, not opt-in).
     #[test]
     fn scan_confusable_defaults_to_true() {
         let p = Policy::default();
         assert!(p.scan_confusable);
     }
 
-    /// v0.3 Sahnehaube B — policy file can disable Stage 4.
+    /// v0.3 Feature B — policy file can disable Stage 4.
     #[test]
     fn scan_confusable_can_be_disabled_via_toml() {
         let dir = tempdir().expect("tmp");

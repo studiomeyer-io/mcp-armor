@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
             let (policy, policy_path) =
                 mcp_armor::policy::load_policy(cli.policy.as_deref()).context("load policy")?;
 
-            // v0.3 Sahnehaube A — startup advisory: surface to the operator
+            // v0.3 Feature A — startup advisory: surface to the operator
             // exactly which loader-class env keys the current shell is
             // leaking into the proxy process. The proxy itself will
             // env_remove these from the *child* before spawn (defence
@@ -181,7 +181,7 @@ async fn main() -> Result<()> {
             if !leaked.is_empty() {
                 tracing::warn!(
                     leaked = ?leaked,
-                    "v0.3 Sahnehaube A: loader-class env keys present in operator shell — these will be stripped from the child but consider clearing them upstream"
+                    "v0.3 Feature A: loader-class env keys present in operator shell — these will be stripped from the child but consider clearing them upstream"
                 );
             }
 

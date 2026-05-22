@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.3.0] — 2026-05-22
 
-v0.3 ships three new defensive layers ("Sahnehauben" — cherry on top)
+v0.3 ships three new defensive layers ("Features" — cherry on top)
 on top of v0.2, all opt-out via policy.toml and all replicable for the
 StudioMeyer Rust security pillars (ai-shield, mcp-rce-guard,
 mcp-stdio-shellguard). Plus a documentation re-scoping of the v0.3
@@ -20,7 +20,7 @@ before tagging. Findings + fixes documented at the bottom of this entry.
 
 ### Added
 
-- **Sahnehaube A — loader-class env-key strip on `wrap`.** Closes the
+- **Feature A — loader-class env-key strip on `wrap`.** Closes the
   Zealynx 2026 forensic side-channel where a registry-fetched MCP
   manifest can specify `env: { LD_PRELOAD: "/evil.so" }` and bypass
   the binary signature verify entirely (env injection is upstream of
@@ -37,7 +37,7 @@ before tagging. Findings + fixes documented at the bottom of this entry.
   integration (`ai-shield` reuse). Tests: 4 unit in policy/loader +
   4 unit in proxy/stdio (with restore via `std::env::remove_var` so
   test isolation is preserved).
-- **Sahnehaube B — UTS-39 confusable / homoglyph skeleton (Stage 4).**
+- **Feature B — UTS-39 confusable / homoglyph skeleton (Stage 4).**
   Closes the Latin-lookalike evasion class that survives NFKC
   byte-for-byte. New module `src/scanner/confusable.rs` ships a hand-
   curated ~180-entry table covering Cyrillic (full upper/lower Latin-
@@ -53,7 +53,7 @@ before tagging. Findings + fixes documented at the bottom of this entry.
   ASCII-only fast-path keeps p99 budget intact. Tests: 11 unit in
   scanner/confusable + 5 integration in scanner/mod against the
   existing CVE feed pattern set.
-- **Sahnehaube C — Trust-Triade CI (supply-chain.yml + scorecard.yml +
+- **Feature C — Trust-Triade CI (supply-chain.yml + scorecard.yml +
   deny.toml).** Three new CI jobs lift mcp-armor into the Tier where
   Falco / Tetragon / sigstore live:
   - `cargo cyclonedx --format json --all` emits a CycloneDX-1.5 SBOM
@@ -356,12 +356,12 @@ v0.3 work:
 
 - **`manifest::tofu::default_path_uses_xdg_data_home` test** uses
   `std::env::set_var` / `remove_var` to manipulate `XDG_DATA_HOME` /
-  `HOME`. v0.3 removed all `set_var` calls from the Sahnehaube A test
+  `HOME`. v0.3 removed all `set_var` calls from the Feature A test
   surface (via the `Policy::leaked_loader_keys_from` dependency-injection
   variant), but the TOFU test still relies on real env mutation. Pre-
   existing from v0.2; R2 Analyst-MED finding. Fix in v0.3.1 by adding a
   `tofu::default_path_from(home: Option<&Path>)` DI helper, mirroring
-  the Sahnehaube A pattern. Currently the test runs reliably because it
+  the Feature A pattern. Currently the test runs reliably because it
   is the only one touching those keys, but `cargo test --jobs 1` would
   be needed if a sibling test ever read the same keys.
 
