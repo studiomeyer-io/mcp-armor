@@ -14,6 +14,7 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use mcp_armor::manifest::drift::{default_path as drift_default_path, History as DriftHistory};
 use mcp_armor::manifest::{verify_with_tofu, Keystore};
+use mcp_armor::util::hex_short;
 use mcp_armor::{ScanHistory, Scanner, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -291,7 +292,7 @@ async fn main() -> Result<()> {
                     // invocations cannot race on the load → mutate →
                     // persist sequence. Bare `persist()` stays available
                     // for legacy / single-process callers.
-                    ks.persist_locked(&keystore_path)
+                    ks.persist_locked_merge(&keystore_path)
                         .context("persist keystore (locked)")?;
                 }
                 println!("{}", serde_json::to_string_pretty(&outcome)?);
@@ -500,7 +501,8 @@ async fn main() -> Result<()> {
                     let mut h = DriftHistory::load(&path).context("load drift history")?;
                     let removed = h.forget(&program);
                     if removed {
-                        h.persist_locked(&path).context("persist drift history")?;
+                        h.persist_locked_merge(&path)
+                            .context("persist drift history")?;
                     }
                     println!(
                         "{}",
@@ -522,7 +524,8 @@ async fn main() -> Result<()> {
                     let entry = h
                         .re_baseline(&program, &value, &now)
                         .context("re-baseline drift entry")?;
-                    h.persist_locked(&path).context("persist drift history")?;
+                    h.persist_locked_merge(&path)
+                        .context("persist drift history")?;
                     println!("{}", serde_json::to_string_pretty(&entry)?);
                     Ok(())
                 }
@@ -540,7 +543,8 @@ async fn main() -> Result<()> {
                         mcp_armor::manifest::drift::format_rfc3339_utc_pub(cutoff_secs);
                     let removed = h.prune_before(&cutoff_iso);
                     if removed > 0 {
-                        h.persist_locked(&path).context("persist drift history")?;
+                        h.persist_locked_merge(&path)
+                            .context("persist drift history")?;
                     }
                     println!(
                         "{}",
@@ -600,10 +604,5 @@ async fn main() -> Result<()> {
     }
 }
 
-fn hex_short(bytes: &[u8], n: usize) -> String {
-    let mut out = String::with_capacity(n * 2);
-    for b in bytes.iter().take(n) {
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
-    }
-    out
-}
+// v0.6 — local `hex_short` removed; using `mcp_armor::util::hex_short`
+// via the import at the top of this file.

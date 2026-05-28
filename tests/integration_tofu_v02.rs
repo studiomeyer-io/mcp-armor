@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+// v0.5/v0.4/v0.2 tests still exercise the bare persist_locked path; v0.6 deprecates it but the path stays functional.
 //! v0.2 integration: TOFU verify-then-pin roundtrip end-to-end.
 //!
 //! Mirrors the operator-facing flow:

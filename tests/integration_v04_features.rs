@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+// v0.5/v0.4/v0.2 tests still exercise the bare persist_locked path; v0.6 deprecates it but the path stays functional.
 //! v0.4 regression tests — locks in the behaviour of every surface that
 //! changed between v0.3.0 (LIVE on crates.io) and v0.4.0. Each test
 //! corresponds to a Round-3 review finding or a v0.3 backlog item so a

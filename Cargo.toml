@@ -1,10 +1,10 @@
 [package]
 name = "mcp-armor"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, detects tools/list schema drift to close the rug-pull / silent-redefinition class (Layer 7, NFKC-canonical fingerprint with off/warn/block modes), exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
+description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, detects tools/list schema drift (Layer 7 closes rug-pull / silent-redefinition class with NFKC-canonical fingerprint + bidirectional inbound/outbound gate + BLAKE3 or SHA-256 backend for FIPS/PCI/HIPAA + optional JCS RFC 8785 canonicalisation + _meta.fingerprint cross-tool audit injection), exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"
 homepage = "https://github.com/studiomeyer-io/mcp-armor"
 authors = ["Matthias Meyer (StudioMeyer) <hi@studiomeyer.io>"]
@@ -89,6 +89,18 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # full macro-driven rewrite. The full `#[tool_router]` macro path lands in
 # v0.3 once the rmcp 1.x release stabilises its feature names.
 rmcp = { version = "0.1", default-features = false, features = ["server", "transport-io", "macros", "base64"], optional = true }
+# v0.6 — RFC 8785 JSON Canonicalization Scheme (JCS) for tools/list
+# fingerprinting. When the `jcs-canonical` feature is on the drift
+# pipeline canonicalises the per-tool JSON sub-tree per RFC 8785 (sorted
+# keys, ECMA-262 number serialisation, I-JSON Unicode normalisation)
+# before hashing instead of relying on our own sort-by-name-only
+# heuristic. Closes the cross-implementation interop gap with IETF
+# MCPS (`draft-sharif-mcps-secure-mcp`) + MIS sealed-manifest publishers
+# who emit JCS-canonical envelopes. `serde_json_canonicalizer` is the
+# actively-maintained 100%-RFC-compatible crate (it explicitly
+# documents the gaps in the older `serde_jcs` crate that motivated its
+# fork). Zero transitive deps beyond `serde_json` which we already pull.
+serde_json_canonicalizer = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -123,6 +135,15 @@ sigstore-bridge = ["dep:reqwest"]
 # hand-rolled JSON-RPC server (the hand-rolled one stays as default — both
 # share the same Scanner/Policy/ScanHistory state).
 rmcp-control = ["dep:rmcp"]
+# v0.6 — JCS (RFC 8785) JSON canonicalisation for drift fingerprints.
+# When enabled, `manifest::drift::fingerprint` canonicalises the per-tool
+# JSON sub-tree before hashing instead of the v0.5 sort-by-name-only
+# heuristic. Off by default — the v0.5 heuristic is stable and
+# interoperable with the existing tools-history.toml schema; JCS only
+# matters when the operator wants byte-identical fingerprints against
+# IETF MCPS / MIS sealed-manifest reference implementations. Adds
+# `serde_json_canonicalizer` (zero transitive deps).
+jcs-canonical = ["dep:serde_json_canonicalizer"]
 
 [[bench]]
 name = "scanner"

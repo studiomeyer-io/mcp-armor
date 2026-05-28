@@ -9,9 +9,9 @@
 //! `rusqlite`-backed implementation together.
 
 use crate::scanner::{ScanResult, ScanVerdict};
+use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Recover the inner data on poison instead of panicking.
 ///
@@ -111,61 +111,13 @@ impl ScanHistory {
     }
 }
 
-fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    format_rfc3339_utc(secs)
-}
-
-/// Format a Unix timestamp (seconds since 1970-01-01 UTC) as an RFC-3339
-/// UTC string, e.g. `2026-05-03T14:23:45Z`. Pure-stdlib civil-from-days
-/// (Howard Hinnant's algorithm shifted to a 1970 epoch); proleptic
-/// Gregorian, valid 1970..9999. No chrono dep, no sub-second precision.
-///
-/// v0.2 Round-1-review note: `manifest::tofu::format_rfc3339_utc` holds
-/// the sibling copy of this function. The two are duplicated rather than
-/// shared via a `util` module because (a) sharing would create a new
-/// always-loaded module for a single ~30-line function and (b) the
-/// alternative (`manifest` importing `control`) inverts the intended
-/// layering. Treat this as a deliberate de-dup avoidance.
-fn format_rfc3339_utc(unix_secs: i64) -> String {
-    let secs_per_day: i64 = 86_400;
-    let days = unix_secs.div_euclid(secs_per_day);
-    let secs_in_day = unix_secs.rem_euclid(secs_per_day);
-    let hour = secs_in_day / 3600;
-    let minute = (secs_in_day % 3600) / 60;
-    let second = secs_in_day % 60;
-
-    let (year, month, day) = civil_from_days(days);
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Convert "days since 1970-01-01" into a (year, month, day) civil date.
-/// Howard Hinnant's algorithm (proleptic Gregorian, correct for the full
-/// 100/400 leap-year rule). Reference:
-/// https://howardhinnant.github.io/date_algorithms.html#civil_from_days
-///
-/// `clippy::similar_names` is allowed here on purpose: `doe` (day-of-era)
-/// and `doy` (day-of-year) are the canonical variable names from
-/// Hinnant's published algorithm. Renaming them would obscure the
-/// reference implementation.
-#[allow(clippy::similar_names)]
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    // Shift epoch from 1970-01-01 to 0000-03-01 to simplify month math.
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    let year = y + i64::from(u8::from(m <= 2));
-    (year, m, d)
-}
+// v0.6 — local rfc3339 + civil-from-days helpers collapsed into
+// `crate::util` (`use crate::util::now_iso` at the top of this file).
+// The v0.2 "deliberate de-dup avoidance" rationale was correct for
+// two-call-sites; with v0.5 it grew to three (drift.rs joined) and
+// the drift risk on the next shape change overtook the layering
+// preservation argument. `crate::util` sits below `control` so the
+// dependency direction is still intact.
 
 #[cfg(test)]
 mod tests {
@@ -217,7 +169,7 @@ mod tests {
 
     #[test]
     fn rfc3339_unix_epoch() {
-        assert_eq!(format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(crate::util::format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
     }
 
     #[test]
@@ -227,14 +179,20 @@ mod tests {
         // civil_from_days roundtrip rather than hand-magic.
         // 2026-05-03 = day 20_576 since 1970-01-01.
         let secs: i64 = 20_576 * 86_400 + 12 * 3600 + 34 * 60 + 56;
-        assert_eq!(format_rfc3339_utc(secs), "2026-05-03T12:34:56Z");
+        assert_eq!(
+            crate::util::format_rfc3339_utc(secs),
+            "2026-05-03T12:34:56Z"
+        );
     }
 
     #[test]
     fn rfc3339_handles_leap_year_feb_29() {
         // 2024-02-29 = day 19_782 since 1970-01-01.
         let secs: i64 = 19_782 * 86_400;
-        assert_eq!(format_rfc3339_utc(secs), "2024-02-29T00:00:00Z");
+        assert_eq!(
+            crate::util::format_rfc3339_utc(secs),
+            "2024-02-29T00:00:00Z"
+        );
     }
 
     #[test]
@@ -243,7 +201,7 @@ mod tests {
         // "2026-01-01T00:00:00Z" must lex-compare correctly against the
         // generated entry timestamps.
         let secs: i64 = 20_576 * 86_400 + 12 * 3600;
-        let ts = format_rfc3339_utc(secs);
+        let ts = crate::util::format_rfc3339_utc(secs);
         assert!(ts.as_str() > "2026-01-01T00:00:00Z");
         assert!(ts.as_str() < "2027-01-01T00:00:00Z");
     }

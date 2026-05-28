@@ -4,7 +4,243 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.5.0 ready, awaiting tag
+## [0.6.0] — 2026-05-29
+
+This release is a **backlog-cleanup + interop pass** on top of v0.5.0
+(LIVE on crates.io since 2026-05-28T22:08Z). Eight of the nine
+items dropped into the v0.5 → v0.6 backlog land in this tag. The
+ninth (rmcp 0.1.5 → 1.5.1+ official Anthropic Rust SDK migration)
+is documented as the v0.7 headline because it touches the
+ServerHandler trait shape and warrants its own review cycle —
+v0.6 keeps the rmcp pin at 0.1.5 for source-compat while every
+control-plane consumer continues to ride the hand-rolled JSON-RPC
+path (the rmcp feature flag has always been opt-in and stub-only).
+
+### Cleanups
+
+- **Single source of truth for RFC-3339 / hex / civil-from-days.**
+  The three sibling copies of `format_rfc3339_utc` + `civil_from_days`
+  + `now_iso` + `hex_short` that lived in `manifest::drift`,
+  `manifest::tofu`, and `control::history` (plus a fourth in
+  `main.rs`) collapse into one canonical implementation in the new
+  `crate::util` module. The v0.2 "deliberate de-dup avoidance"
+  rationale was correct for two copies; with v0.5 it grew to
+  three and the drift risk on the next shape change (fractional
+  seconds, leap-second carve-out) overtook the layering preservation
+  argument. `crate::util` is the lowest layer in the crate (no
+  cross-imports from `manifest`, `control`, or `proxy`) so the
+  dependency direction stays intact.
+- **`drift_block_response` JSON-RPC shape moved.** The
+  `proxy::stdio`-local `drift_block_response` + its companion
+  `ERR_DRIFT_POLICY_VIOLATION` constant (`-32001`) move into
+  `manifest::drift`, so a future `armor_simulate_drift_block`
+  control-plane tool can render the same shape without
+  duplicating construction.
+- **`persist_locked` bare entry-points marked deprecated** on both
+  `manifest::drift::History` and `manifest::tofu::Keystore`. The
+  v0.5 R1 review migrated the proxy hot path to
+  `History::persist_locked_merge`; v0.6 surfaces the deprecation
+  to library consumers + ships a matching
+  `Keystore::persist_locked_merge` so the keystore CLI flow
+  (`mcp-armor verify --pin-on-first-use`,
+  `mcp-armor keystore pin`) is multi-process-safe end-to-end. The
+  bare paths stay functional behind `#[deprecated(since = "0.6.0")]`
+  for legacy / single-process call sites that already own their
+  load → mutate → persist sequence.
+
+### Interop & symmetry
+
+- **`notifications/{prompts,resources}/list_changed` recognised**
+  symmetrically with `notifications/tools/list_changed`. v0.6
+  surfaces the prompts + resources notifications at `tracing::info`
+  so the operator audit trail stays complete even when the upstream
+  emits a refresh notification for a surface the v0.6 fingerprint
+  pipeline doesn't yet cover. Fingerprinting prompts/list and
+  resources/list responses is a v0.8 backlog item — the
+  notifications are already wired so v0.8 just has to extend the
+  observe pipeline.
+
+### New defenses (additive — all default to off)
+
+- **Inbound-side drift gate** (`policy.tools_list_drift_inbound_check`).
+  When set to `true` AND `tools_list_drift_detection = "block"`
+  AND a baseline already exists for the program, the proxy
+  refuses an inbound `tools/list` REQUEST envelope before it
+  reaches the upstream server. Default: `false`. The outbound
+  gate that v0.5 ships still covers the rug-pull class in the
+  default setup; the inbound gate is for paranoid deployments
+  where the upstream is no longer trusted to even respond to a
+  tools/list (e.g. mid-investigation when a drift event is open).
+- **SHA-256 backend** (`policy.tools_list_hash_backend = "sha256"`).
+  BLAKE3 stays the default (3x faster with hardware acceleration);
+  SHA-256 is the **FIPS-compliant** alternative for customers gated
+  on PCI-DSS section 3.5.1.2 or HIPAA Security Rule §164.312(e)(2)(ii)
+  interpretations that require NIST-approved hash primitives. The
+  implementation is RustCrypto's `sha2 = "0.11"` — algorithmically
+  FIPS 180-4 compliant but NOT a FIPS 140-3 *validated module*
+  (no CMVP certificate). FedRAMP / DoD deployments that require a
+  validated module would need a future `feature = "fips"` opt-in
+  backed by e.g. `aws-lc-rs` with the FIPS feature — that is on
+  the v0.7 backlog. Switching backends does NOT auto-rebaseline
+  existing pins — each baseline records the backend it was pinned
+  with and the compare path uses the baseline's own backend until
+  the operator explicitly clears + re-pins via
+  `mcp-armor drift clear <program>`.
+- **JCS (RFC 8785) canonicalisation** behind the `jcs-canonical`
+  Cargo feature (off by default) + the
+  `policy.tools_list_jcs_canonicalize` policy field. When the
+  feature is built in AND the policy toggle is on, each per-tool
+  JSON sub-tree is canonicalised per RFC 8785 (sorted keys,
+  ECMA-262 number serialisation, I-JSON Unicode normalisation)
+  before hashing. Closes the cross-implementation interop gap
+  with IETF MCPS (`draft-sharif-mcps-secure-mcp`) and MIS
+  sealed-manifest publishers. Dependency:
+  `serde_json_canonicalizer = "0.3"` (zero transitive deps
+  beyond `serde_json`; the actively-maintained crate, vs the
+  abandoned `serde_jcs` fork).
+- **`_meta.dev.studiomeyer/armor.fingerprint` injection (SEP-2659
+  pattern).** When `policy.inject_fingerprint_meta = true`, the
+  proxy stamps each observed tools/list response with the
+  per-program baseline's fingerprint under
+  `_meta[META_FINGERPRINT_KEY]` before forwarding it to the
+  client. Lets downstream MCP clients (or other security
+  sidecars sitting in line) correlate the manifest they see
+  with the baseline mcp-armor pinned without round-tripping
+  through the control plane. The injected shape is a stable
+  7-field object — adding a field is a v0.7 SemVer-minor break.
+
+### Surfaces added
+
+- `mcp_armor::util` — new top-level module: `format_rfc3339_utc`,
+  `civil_from_days`, `now_iso`, `hex_short`. Pure, no I/O.
+- `mcp_armor::manifest::drift::HashBackend` enum (`Blake3` |
+  `Sha256`) + `HashBackend::prefix()` accessor.
+- `mcp_armor::manifest::drift::FingerprintOpts` struct
+  (`backend` + `jcs_canonicalize`).
+- `mcp_armor::manifest::drift::ERR_DRIFT_POLICY_VIOLATION` const
+  (`-32001`).
+- `mcp_armor::manifest::drift::META_FINGERPRINT_KEY` const
+  (`"dev.studiomeyer/armor.fingerprint"`).
+- `mcp_armor::manifest::drift::drift_block_response()` and
+  `drift_block_inbound_response()` (both moved from
+  `proxy::stdio` so the JSON-RPC shape is reusable).
+- `mcp_armor::manifest::drift::fingerprint_with_opts()` +
+  `History::observe_with_opts()` + `History::re_baseline_with_opts()`.
+- `mcp_armor::manifest::drift::looks_like_prompts_list_changed_notification()`,
+  `looks_like_resources_list_changed_notification()`,
+  `looks_like_tools_list_request()`.
+- `mcp_armor::manifest::drift::fingerprint_meta_value()` +
+  `inject_fingerprint_meta()`.
+- `mcp_armor::manifest::tofu::Keystore::persist_locked_merge()`.
+- `mcp_armor::manifest::drift::History::persist_locked_merge()`
+  (already shipped in v0.5; v0.6 deprecates the bare
+  `persist_locked` companion).
+- `Policy` fields: `tools_list_drift_inbound_check: bool`,
+  `tools_list_hash_backend: HashBackend`,
+  `tools_list_jcs_canonicalize: bool`,
+  `inject_fingerprint_meta: bool`. All `#[serde(default)]` —
+  existing `policy.toml` files load unchanged.
+- `Policy::drift_fingerprint_opts()` helper that bundles the
+  hash backend + JCS toggle into a `FingerprintOpts`.
+- Control-plane `armor_get_policy` surfaces every new toggle so
+  operators inspecting the live config see the v0.6 surface in
+  one call.
+
+### Persistence schema changes
+
+- `tools-history.toml` baseline rows gain two new fields:
+  `hash_backend` (defaults to `blake3` for v0.5 entries via
+  `#[serde(default)]`) and `jcs_canonical` (defaults to
+  `false`). Forward-compat with schema_version=1 — no
+  schema bump. v0.5 baselines load unchanged and continue
+  matching with the BLAKE3 backend / no-JCS pipeline.
+
+### Pre-tag gates (lokal verifiziert)
+
+- `cargo test --no-default-features` → **278 / 278** pass (was
+  247 in v0.5; +31 v0.6 tests, +12%).
+- `cargo test --all-features` → **278 / 278** pass (the JCS
+  feature lights up one extra test; the
+  `cfg(not(feature="sigstore-bridge"))` test correctly skips on
+  this build matrix).
+- `cargo clippy --all-targets --all-features -- -D warnings`
+  clean.
+- `cargo clippy --no-default-features --all-targets -- -D warnings`
+  clean.
+- `cargo fmt --check` clean.
+- `cargo deny --all-features check` → advisories ok / bans ok /
+  licenses ok / sources ok (two `license-not-encountered`
+  warnings on `MPL-2.0` + `Unicode-DFS-2016` are forward-compat
+  buffer + dokumentiert).
+
+### Backwards compatibility
+
+- All v0.6 policy toggles are `#[serde(default)]`, so existing
+  `policy.toml` files load unchanged.
+- `tools-history.toml` baselines from v0.5 load as
+  `hash_backend = blake3` + `jcs_canonical = false` via
+  `#[serde(default)]`, matching the v0.5 pipeline byte-for-byte.
+- `mcp_armor::proxy::run_proxy`'s signature is **unchanged from
+  v0.5** — the new `policy` thread-through happens inside the
+  outbound task via the existing `PolicyHandle`.
+- `manifest::drift::fingerprint(program, tools_list)` keeps its
+  v0.5 signature; the new `fingerprint_with_opts(program,
+  tools_list, opts)` is the supported extension point.
+- `manifest::drift::History::observe(...)` keeps its v0.5
+  signature; `observe_with_opts(...)` adds the new options bundle.
+- `History::persist_locked` and `Keystore::persist_locked` are
+  marked `#[deprecated(since = "0.6.0")]` but stay functional —
+  legacy tests + single-process CLI flows continue to pass
+  without modification, with a deprecation lint surfaced to
+  library consumers.
+
+### v0.7 Backlog (Priority-ordered after R1 Research)
+
+**PRIORITY 1 — supply-chain advisory triage:**
+
+| Item | Begründung |
+|---|---|
+| **rmcp 0.1.5 → 1.5.1+ (CVE-2026-42559 PUBLIC since NVD 2026-05-14, CVSS 8.8)** | The DNS-rebinding fix is in the 1.x line only. `rmcp` is at >4.7M downloads on crates.io. Our `rmcp_server` module is a stub behind the off-by-default `rmcp-control` feature so the 0.1.5 pin is transitively unreachable in production, but **every `cargo audit` against a downstream crate that pulls mcp-armor will surface CVE-2026-42559 once the advisory propagates to the rustsec advisory-db**. R1 Research lifted this from "carry forward" to v0.7 priority #1. Migration touches the `ServerHandler` trait rewrite + `tool_router` macro path swap + MCP protocolVersion `2025-06-18` → `2025-11-25` bump. |
+| **Re-verify all 7 surfaces against MCP 2026-07-28 RC** | MCP 2026-07-28 release candidate dropped after the v0.6 ship date (R1 Research finding). Stateless protocol, Extensions framework, and 3 core feature deprecations. Per-program TOFU keystore design is forward-compatible with the stateless shift (R1 Research confirmed), but `notifications/*/list_changed` recognition handlers + `_meta` injection need a re-verification pass against the RC text. |
+
+**PRIORITY 2 — Sigstore stack:**
+
+| Item | Begründung |
+|---|---|
+| Fulcio cert-chain verification (`--certificate-identity` + `--certificate-oidc-issuer`) | R1 Research finding: the Rust ecosystem now has `sigstore-fulcio` + `sigstore-trust-root` crates that make this easier than the v0.5 backlog estimated. **Land BEFORE Rekor v2** because the dependency tree is cleaner. |
+| Rekor v2 Tiles support (`log2025-1.rekor.sigstore.dev`) | R1 Research confirmation: Rekor v2 went GA on 2025-10-10 (not pending). The Rust client for v2 specifically does NOT yet exist (`sigstore` crate 0.14 is v1-only), so v0.7 either waits for the upstream client or rolls our own thin v2-tiles fetcher. v1 stays for ~12 months — no rush. |
+
+**PRIORITY 3 — code-org carryovers from R1 Analyst W2-W5:**
+
+| Item | Begründung |
+|---|---|
+| Retire the `now_iso` + `format_rfc3339_utc_pub` shims in `manifest::drift` | R1 Analyst W2 — the two shims forward to `crate::util` but live for backward call-site compatibility. Updating the two external callers (proxy/stdio.rs, main.rs) + removing the shims gets `manifest::drift` to one less drift point. |
+| Split `DriftDecision::Replace` / `PassThroughWithMeta` block + tracing | R1 Critic M1 + R1 Analyst W1 — the v0.6 R1 fix split the OR-arm structurally, but each variant still calls the same `encode()` helper. v0.7 should add per-variant tracing / OTLP span labelling so block + enrich diverge in audit log. |
+| `History::load_from_str` + `to_toml_string` snapshot helpers | R1 Analyst W3 — replaces `tempfile::tempdir()` in unit tests with pure in-memory I/O. Avoids sandbox-failure risk. |
+| `Policy::validate() -> Result<(), Vec<String>>` | R1 Analyst W5 — cross-field constraints (e.g. `tools_list_drift_inbound_check = true` is a no-op unless `tools_list_drift_detection = "block"`) should surface at load time, not at first-blocked-request time. |
+| Process-level proxy E2E smoke test | R1 Analyst W4 — `run_proxy` (~330 LOC, two async closures) has zero process-spawn coverage. Spawn a `cat`-based echo upstream + send a crafted `tools/list` envelope + assert the outbound stamping or block response on stdout. |
+
+**PRIORITY 4 — telemetry + compliance:**
+
+| Item | Begründung |
+|---|---|
+| `tracing-opentelemetry` auto-bridge to 0.33 | Currently we hold at OTLP 0.30 (LTS-shaped). 0.32 reworked the metrics SDK in ways we don't consume; bumping in a single migration tag once we add an OTLP metrics surface. |
+| `feature = "fips"` opt-in backed by `aws-lc-rs` FIPS mode | R1 Research finding: RustCrypto's `sha2` is algorithmically FIPS 180-4 compliant but NOT a FIPS 140-3 *validated module*. PCI-DSS and HIPAA accept algorithmic compliance; FedRAMP / DoD contracts require a validated module. v0.7 opt-in feature lets the operator pick the validated backend at compile time. |
+| Inbound-side drift gate covering `prompts/list` + `resources/list` | Symmetry with v0.6 — the notification surfaces are already recognised, the fingerprint pipeline just needs an extension to the response shape. |
+| `armor_simulate_drift_block` control-plane tool | The shape is now in `manifest::drift`, the tool just has to expose it. |
+| Windows targets | weiterhin pending, kein Druck. |
+
+### Memory-Anchors v0.6 (Session 1233)
+
+Pending — added after the Tag + crates.io publish.
+
+---
+
+## [0.5.0] — 2026-05-28
+
+(see [release v0.5.0](https://github.com/studiomeyer-io/mcp-armor/releases/tag/v0.5.0))
+
+## [Unreleased — superseded by 0.5.0 above] — v0.5.0 ready, awaiting tag
 
 This entry captures the **v0.5.0 work** built on top of the
 code-complete-but-untagged v0.4.0 (Session 1187, 2026-05-25). The

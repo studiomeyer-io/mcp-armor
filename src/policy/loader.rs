@@ -1,5 +1,5 @@
 use crate::error::ArmorError;
-use crate::manifest::drift::DriftMode;
+use crate::manifest::drift::{DriftMode, HashBackend};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,15 @@ pub const DEFAULT_DENY_ENV_KEYS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// v0.6 introduces three additional bool toggles
+// (`tools_list_drift_inbound_check`, `tools_list_jcs_canonicalize`,
+// `inject_fingerprint_meta`) — clippy's `struct_excessive_bools` lint
+// fires at 4+ bools. The natural alternative (a `flags: DriftFlags`
+// sub-struct) makes the TOML-file authoring surface clumsier than the
+// problem warrants (operators get `tools_list_jcs_canonicalize = true`
+// at top level today; nested they'd write `[drift_flags] jcs = true`).
+// Bools stay; the lint is silenced at struct scope.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Policy {
     pub fail_mode: FailMode,
     pub scan_unicode: bool,
@@ -101,6 +110,48 @@ pub struct Policy {
     /// regardless of mode — Layer 7 is fail-open on bootstrap.
     #[serde(default)]
     pub tools_list_drift_detection: DriftMode,
+    /// v0.6 (carried-forward v0.5 backlog item — Inbound-side drift
+    /// gate). When `true` AND `tools_list_drift_detection = "block"`
+    /// AND a baseline already exists for this program, the proxy
+    /// short-circuits any incoming `tools/list` request and replies
+    /// with the inbound-block error directly — never spawning a
+    /// round-trip to the upstream. Default: `false`. Use this in
+    /// paranoid setups where the upstream is no longer trusted to even
+    /// respond to a tools/list (e.g. when an in-flight drift
+    /// investigation is open). The outbound gate is still active in
+    /// the default setup; this flag is purely additive.
+    #[serde(default)]
+    pub tools_list_drift_inbound_check: bool,
+    /// v0.6 — backend used to compute the per-tool description hash +
+    /// the aggregate fingerprint. `blake3` is the default (3x faster
+    /// with hardware acceleration). `sha256` is the FIPS-validated
+    /// alternative for customers gated on FIPS 140-3 / PCI-DSS 3.5.1.2
+    /// / HIPAA Security Rule §164.312(e)(2)(ii). Switching backends
+    /// does NOT auto-rebaseline existing pins — each baseline records
+    /// the backend it was pinned with and the compare path uses the
+    /// baseline's own backend until the operator clears + re-pins.
+    #[serde(default)]
+    pub tools_list_hash_backend: HashBackend,
+    /// v0.6 — when `true` and the crate was built with the
+    /// `jcs-canonical` feature, each per-tool JSON sub-tree is
+    /// canonicalised per RFC 8785 (JCS) before hashing. Without the
+    /// feature, the flag is silently ignored (a one-shot
+    /// `tracing::warn` surfaces the gap). Off by default — the v0.5
+    /// heuristic is stable and the tools-history.toml schema records
+    /// each baseline's canonicalisation flavour so a flip does not
+    /// invalidate existing pins.
+    #[serde(default)]
+    pub tools_list_jcs_canonicalize: bool,
+    /// v0.6 (SEP-2659 pattern) — when `true`, the proxy stamps each
+    /// observed tools/list response with the per-program baseline's
+    /// fingerprint under `_meta.dev.studiomeyer/armor.fingerprint`
+    /// before forwarding it to the client. Lets downstream MCP
+    /// clients (or other security sidecars sitting in line)
+    /// correlate the manifest they see with the baseline mcp-armor
+    /// pinned without round-tripping through the control plane. Off
+    /// by default — additive feature.
+    #[serde(default)]
+    pub inject_fingerprint_meta: bool,
     pub version: String,
 }
 
@@ -126,6 +177,10 @@ impl Default for Policy {
             deny_env_keys: default_deny_env_keys(),
             scan_confusable: true,
             tools_list_drift_detection: DriftMode::default(),
+            tools_list_drift_inbound_check: false,
+            tools_list_hash_backend: HashBackend::default(),
+            tools_list_jcs_canonicalize: false,
+            inject_fingerprint_meta: false,
             version: "default".to_string(),
         }
     }
@@ -177,6 +232,20 @@ impl Policy {
         }
         out.sort();
         out
+    }
+}
+
+impl Policy {
+    /// v0.6 — assemble the [`FingerprintOpts`] bundle the drift
+    /// pipeline consumes. Wraps the two policy toggles
+    /// (`tools_list_hash_backend` + `tools_list_jcs_canonicalize`)
+    /// into the cheap-to-clone shape the proxy hot path expects.
+    #[must_use]
+    pub fn drift_fingerprint_opts(&self) -> crate::manifest::drift::FingerprintOpts {
+        crate::manifest::drift::FingerprintOpts {
+            backend: self.tools_list_hash_backend,
+            jcs_canonicalize: self.tools_list_jcs_canonicalize,
+        }
     }
 }
 
@@ -450,6 +519,178 @@ version = "no-confusable"
         .expect("write");
         let (pol, _) = load_policy(Some(&p)).expect("ok");
         assert!(!pol.scan_confusable);
+    }
+
+    // ─── v0.6 tests (S1233 follow-up) ───────────────────────────────────
+
+    /// v0.6 — `tools_list_drift_inbound_check` defaults to `false`.
+    #[test]
+    fn drift_inbound_check_defaults_to_false() {
+        let p = Policy::default();
+        assert!(!p.tools_list_drift_inbound_check);
+    }
+
+    /// v0.6 — `tools_list_hash_backend` defaults to BLAKE3.
+    #[test]
+    fn hash_backend_defaults_to_blake3() {
+        let p = Policy::default();
+        assert_eq!(
+            p.tools_list_hash_backend,
+            crate::manifest::drift::HashBackend::Blake3
+        );
+    }
+
+    /// v0.6 — `tools_list_jcs_canonicalize` defaults to `false`.
+    #[test]
+    fn jcs_canonicalize_defaults_to_false() {
+        let p = Policy::default();
+        assert!(!p.tools_list_jcs_canonicalize);
+    }
+
+    /// v0.6 — `inject_fingerprint_meta` defaults to `false`.
+    #[test]
+    fn inject_fingerprint_meta_defaults_to_false() {
+        let p = Policy::default();
+        assert!(!p.inject_fingerprint_meta);
+    }
+
+    /// v0.6 — `drift_fingerprint_opts()` reflects the policy fields.
+    #[test]
+    fn drift_fingerprint_opts_reflects_policy_fields() {
+        let p = Policy {
+            tools_list_hash_backend: crate::manifest::drift::HashBackend::Sha256,
+            tools_list_jcs_canonicalize: true,
+            ..Policy::default()
+        };
+        let opts = p.drift_fingerprint_opts();
+        assert_eq!(opts.backend, crate::manifest::drift::HashBackend::Sha256);
+        assert!(opts.jcs_canonicalize);
+    }
+
+    /// v0.6 — TOML parses `tools_list_hash_backend = "sha256"`.
+    #[test]
+    fn parses_v06_hash_backend_from_toml() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+tools_list_hash_backend = "sha256"
+version = "v06-sha256"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert_eq!(
+            pol.tools_list_hash_backend,
+            crate::manifest::drift::HashBackend::Sha256
+        );
+    }
+
+    /// v0.6 — TOML parses `tools_list_jcs_canonicalize = true`.
+    #[test]
+    fn parses_v06_jcs_toggle_from_toml() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+tools_list_jcs_canonicalize = true
+version = "v06-jcs"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(pol.tools_list_jcs_canonicalize);
+    }
+
+    /// v0.6 — TOML parses `inject_fingerprint_meta = true`.
+    #[test]
+    fn parses_v06_inject_fingerprint_meta_from_toml() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+inject_fingerprint_meta = true
+version = "v06-meta"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(pol.inject_fingerprint_meta);
+    }
+
+    /// v0.6 — TOML parses `tools_list_drift_inbound_check = true`.
+    #[test]
+    fn parses_v06_inbound_check_from_toml() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+tools_list_drift_inbound_check = true
+version = "v06-inbound"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(pol.tools_list_drift_inbound_check);
+    }
+
+    /// v0.6 — a v0.5 policy file (missing all four v0.6 fields)
+    /// loads cleanly with safe defaults.
+    #[test]
+    fn v05_policy_file_loads_with_v06_safe_defaults() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+scan_confusable = true
+tools_list_drift_detection = "warn"
+version = "v05-as-loaded-by-v06"
+"#,
+        )
+        .expect("write");
+        let (pol, _) = load_policy(Some(&p)).expect("ok");
+        assert!(!pol.tools_list_drift_inbound_check);
+        assert_eq!(
+            pol.tools_list_hash_backend,
+            crate::manifest::drift::HashBackend::Blake3
+        );
+        assert!(!pol.tools_list_jcs_canonicalize);
+        assert!(!pol.inject_fingerprint_meta);
+    }
+
+    /// v0.6 — `tools_list_hash_backend` rejects unknown values (it's
+    /// an enum, not a free-form string).
+    #[test]
+    fn unknown_hash_backend_value_fails_to_parse() {
+        let dir = tempdir().expect("tmp");
+        let p = dir.path().join("policy.toml");
+        std::fs::write(
+            &p,
+            r#"
+fail_mode = "closed"
+scan_unicode = true
+tools_list_hash_backend = "md5"
+version = "bogus"
+"#,
+        )
+        .expect("write");
+        let r = load_policy(Some(&p));
+        assert!(matches!(r, Err(ArmorError::Toml(_))));
     }
 
     /// v0.2 — file mode advisory: load_policy must NOT refuse a 0o644 file,

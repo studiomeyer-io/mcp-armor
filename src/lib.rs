@@ -36,6 +36,7 @@ pub mod proxy;
 #[cfg(feature = "rmcp-control")]
 pub mod rmcp_server;
 pub mod scanner;
+pub mod util;
 
 pub use control::history::ScanHistory;
 pub use error::ArmorError;

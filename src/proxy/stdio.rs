@@ -8,7 +8,8 @@
 use crate::control::history::ScanHistory;
 use crate::error::ArmorError;
 use crate::manifest::drift::{
-    self, default_path as drift_default_path, DriftKind, DriftMode, History as DriftHistory,
+    self, default_path as drift_default_path, drift_block_inbound_response, drift_block_response,
+    inject_fingerprint_meta, DriftKind, DriftMode, History as DriftHistory,
 };
 use crate::policy::{snapshot, FailMode, Policy, PolicyHandle};
 use crate::scanner::{ScanResult, ScanVerdict, Scanner};
@@ -35,59 +36,50 @@ fn block_response(id: Value, matched: &[String], cves: &[String]) -> Value {
     })
 }
 
-/// v0.5 R1 Critic-MED fix — drift block uses JSON-RPC code `-32001`
-/// (implementation-defined server error, "policy violation") instead of
-/// `-32603` ("internal error"). `-32603` causes MCP clients (Claude
-/// Desktop, Cursor) to treat the failure as transient and retry the
-/// `tools/list` indefinitely — every retry triggers another drift check
-/// and the loop continues until the operator clears the baseline. The
-/// custom code in the reserved implementation-defined range
-/// (`-32099`..=`-32000`) tells smart clients "this is a deliberate
-/// refusal, do not auto-retry; surface to the operator."
-const ERR_DRIFT_POLICY_VIOLATION: i64 = -32001;
+// v0.6 — drift block JSON-RPC shape moved into `manifest::drift` so a
+// future `armor_simulate_drift_block` control-plane tool can render
+// the same shape without duplicating construction. `ERR_DRIFT_POLICY_VIOLATION`
+// is now `drift::ERR_DRIFT_POLICY_VIOLATION` and `drift_block_response` +
+// `drift_block_inbound_response` are imported at the top of this file.
 
-/// v0.5 Layer 7 — block-response for a tools/list whose schema drifted
-/// from the stored baseline. Replaces the outbound response on its way
-/// back to the client so the LLM never sees the mutated schema.
-fn drift_block_response(id: Value, program: &str, detail: &drift::DriftDetail) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": ERR_DRIFT_POLICY_VIOLATION,
-            "message": "tools/list drift detected by mcp-armor — policy violation",
-            "data": {
-                "program": program,
-                "drift": detail,
-                "remediation": "review the diff, then run `mcp-armor drift trust <program> <manifest.json>` to accept the new shape or `mcp-armor drift clear <program>` to delete the baseline"
-            }
-        }
-    })
+/// v0.6 — decision returned by [`run_drift_check`] for an outbound
+/// envelope. `PassThrough` = emit the original line unchanged.
+/// `Replace(value)` = emit `value` instead of the original line
+/// (block mode rejected the response). `PassThroughWithMeta(value)`
+/// = emit `value` instead of the original line because the operator
+/// asked us to stamp a `_meta.dev.studiomeyer/armor.fingerprint`
+/// onto the tools/list envelope but the underlying response itself
+/// is allowed through.
+pub(crate) enum DriftDecision {
+    PassThrough,
+    Replace(Value),
+    PassThroughWithMeta(Value),
 }
 
-/// v0.5 Layer 7 — run the schema-drift detection sweep on a single
-/// outbound envelope. Side-effects (history mutation + persist) happen
-/// inside; the return value tells the caller whether the original line
-/// should pass through (`None`) or be replaced with a JSON-RPC error
-/// (`Some(replacement)`).
+/// v0.5 Layer 7 + v0.6 fingerprint-meta — outbound drift detection
+/// sweep. Side-effects (history mutation + persist) happen inside.
 ///
-/// Performs `load → observe → persist_locked` per tools/list response —
-/// drift detection runs on first-sight + every tools/list refresh,
-/// never on tools/call traffic. Persist is atomic + flock-serialised so
-/// two concurrent `wrap` processes booting against the same upstream
-/// cannot race on the first-sight baseline.
+/// Performs `load → observe → persist_locked_merge` per tools/list
+/// response — drift detection runs on first-sight + every tools/list
+/// refresh, never on tools/call traffic. Persist is atomic +
+/// flock-serialised so two concurrent `wrap` processes booting against
+/// the same upstream cannot race on the first-sight baseline.
 ///
 /// Errors during load/persist are logged at `error` and the envelope
 /// passes through — drift detection must never *block* a legitimate
 /// response just because the history file is unreadable.
+///
+/// v0.6 — `policy` is now passed in to make the hash-backend + JCS +
+/// fingerprint-meta toggles visible to the drift pipeline.
 pub(crate) fn run_drift_check(
     program: &str,
     envelope: &Value,
-    mode: DriftMode,
+    policy: &Policy,
     history_path: &std::path::Path,
-) -> Option<Value> {
+) -> DriftDecision {
+    let mode = policy.tools_list_drift_detection;
     if mode == DriftMode::Off {
-        return None;
+        return DriftDecision::PassThrough;
     }
 
     // v0.5 R1 Research-P0 — surface `notifications/tools/list_changed`
@@ -103,11 +95,30 @@ pub(crate) fn run_drift_check(
             program = program,
             "drift: server emitted notifications/tools/list_changed — next tools/list will be drift-checked against the existing baseline (not auto-reset)"
         );
-        return None;
+        return DriftDecision::PassThrough;
+    }
+
+    // v0.6 — symmetric surface for prompts/resources list_changed.
+    // We don't fingerprint these envelopes yet (v0.8 backlog), but
+    // surfacing the notification gives operators a complete audit
+    // trail without filing a separate bug.
+    if drift::looks_like_prompts_list_changed_notification(envelope) {
+        tracing::info!(
+            program = program,
+            "drift: server emitted notifications/prompts/list_changed — fingerprinting of prompts/list is a v0.8 backlog item; the notification is surfaced for audit symmetry only"
+        );
+        return DriftDecision::PassThrough;
+    }
+    if drift::looks_like_resources_list_changed_notification(envelope) {
+        tracing::info!(
+            program = program,
+            "drift: server emitted notifications/resources/list_changed — fingerprinting of resources/list is a v0.8 backlog item; the notification is surfaced for audit symmetry only"
+        );
+        return DriftDecision::PassThrough;
     }
 
     if !drift::looks_like_tools_list_response(envelope) {
-        return None;
+        return DriftDecision::PassThrough;
     }
 
     let mut history = match DriftHistory::load(history_path) {
@@ -118,12 +129,13 @@ pub(crate) fn run_drift_check(
                 path = %history_path.display(),
                 "drift: load history failed — passing tools/list through"
             );
-            return None;
+            return DriftDecision::PassThrough;
         }
     };
 
     let now = drift::now_iso();
-    let outcome = match history.observe(program, envelope, &now) {
+    let opts = policy.drift_fingerprint_opts();
+    let outcome = match history.observe_with_opts(program, envelope, &now, opts) {
         Ok(o) => o,
         Err(e) => {
             tracing::error!(
@@ -131,7 +143,7 @@ pub(crate) fn run_drift_check(
                 program = program,
                 "drift: observe failed (malformed tools/list?) — passing through"
             );
-            return None;
+            return DriftDecision::PassThrough;
         }
     };
 
@@ -165,9 +177,29 @@ pub(crate) fn run_drift_check(
                 program,
                 program,
             );
-            None
+            // v0.6 — even on first-sight, if the operator wants the
+            // fingerprint stamped onto the envelope, do that now.
+            if policy.inject_fingerprint_meta {
+                if let Some(baseline) = history.find(program) {
+                    return DriftDecision::PassThroughWithMeta(inject_fingerprint_meta(
+                        envelope, baseline,
+                    ));
+                }
+            }
+            DriftDecision::PassThrough
         }
-        DriftKind::Match => None,
+        DriftKind::Match => {
+            // v0.6 — on Match, stamp the fingerprint into the response
+            // envelope if the operator asked for it.
+            if policy.inject_fingerprint_meta {
+                if let Some(baseline) = history.find(program) {
+                    return DriftDecision::PassThroughWithMeta(inject_fingerprint_meta(
+                        envelope, baseline,
+                    ));
+                }
+            }
+            DriftDecision::PassThrough
+        }
         DriftKind::Drift(detail) => {
             tracing::warn!(
                 program = program,
@@ -181,12 +213,52 @@ pub(crate) fn run_drift_check(
             );
             if mode == DriftMode::Block {
                 let id = envelope.get("id").cloned().unwrap_or(Value::Null);
-                Some(drift_block_response(id, program, &detail))
+                DriftDecision::Replace(drift_block_response(id, program, &detail))
             } else {
-                None
+                DriftDecision::PassThrough
             }
         }
     }
+}
+
+/// v0.6 — inbound-side drift gate. When `policy.tools_list_drift_detection`
+/// is `Block` AND `policy.tools_list_drift_inbound_check` is `true`
+/// AND a baseline already exists for `program`, refuse an inbound
+/// `tools/list` REQUEST envelope before it reaches the upstream
+/// server. Returns `Some(block_response)` when the inbound should be
+/// short-circuited, `None` to let the request through unchanged.
+///
+/// This is purely additive — `tools_list_drift_inbound_check`
+/// defaults to `false`. The outbound gate covers the same threat
+/// class in the default setup; the inbound gate is for paranoid
+/// deployments where the upstream is no longer trusted to even
+/// respond to a tools/list (e.g. mid-investigation).
+pub(crate) fn run_drift_check_inbound(
+    program: &str,
+    envelope: &Value,
+    policy: &Policy,
+    history_path: &std::path::Path,
+) -> Option<Value> {
+    if !policy.tools_list_drift_inbound_check {
+        return None;
+    }
+    if policy.tools_list_drift_detection != DriftMode::Block {
+        return None;
+    }
+    if !drift::looks_like_tools_list_request(envelope) {
+        return None;
+    }
+    // Only block when a baseline already exists — otherwise we'd
+    // prevent the first-sight bootstrap entirely.
+    let history = DriftHistory::load(history_path).ok()?;
+    history.find(program)?;
+    tracing::warn!(
+        program = program,
+        history_path = %history_path.display(),
+        "drift: inbound tools/list refused by paranoid policy (tools_list_drift_inbound_check=true + baseline already pinned)"
+    );
+    let id = envelope.get("id").cloned().unwrap_or(Value::Null);
+    Some(drift_block_inbound_response(id, program))
 }
 
 /// Decide whether `policy.allow_servers` says we should bypass the scanner
@@ -292,6 +364,7 @@ pub async fn run_proxy(
     let program_for_out = program.to_string();
 
     // Inbound: client → child, scanned (unless allowlisted).
+    let drift_history_path_in = drift_history_path.clone();
     let inbound = tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin).lines();
@@ -322,6 +395,21 @@ pub async fn run_proxy(
             // messages is visible immediately. Cheap struct-clone, drop the
             // read-lock before any .await.
             let pol: Policy = snapshot(&policy_in);
+
+            // v0.6 — Inbound-side drift gate. When the operator has set
+            // `tools_list_drift_detection = "block"` AND
+            // `tools_list_drift_inbound_check = true` AND a baseline
+            // exists for this program, refuse the request before it
+            // reaches the upstream.
+            if let Some(block) =
+                run_drift_check_inbound(&program_for_in, &envelope, &pol, &drift_history_path_in)
+            {
+                let mut out = serde_json::to_string(&block)?;
+                out.push('\n');
+                stdout.write_all(out.as_bytes()).await?;
+                stdout.flush().await?;
+                continue;
+            }
 
             // Policy: allowlisted upstream binary skips the scanner entirely.
             // Round 1 M4 fix: re-evaluated against the *current* snapshot so
@@ -422,11 +510,11 @@ pub async fn run_proxy(
                 Err(e) => return Err::<(), ArmorError>(ArmorError::Io(e)),
             };
             let trimmed = line.trim();
-            // v0.5 Layer 7 — drift-check replacement payload. When set,
-            // we emit this replacement INSTEAD of the original line so
-            // the client never sees a mutated tools/list shape under
-            // policy.tools_list_drift_detection = "block".
-            let mut drift_replacement: Option<Value> = None;
+            // v0.5 Layer 7 + v0.6 fingerprint-meta — drift outcome.
+            // `PassThrough` keeps the original line; `Replace(value)`
+            // swaps in a JSON-RPC error (block mode); `PassThroughWithMeta(value)`
+            // swaps in a stamped clone of the original envelope.
+            let mut drift_decision: DriftDecision = DriftDecision::PassThrough;
             if !trimmed.is_empty() {
                 let pol: Policy = snapshot(&policy_out);
                 // Round 1 M4 fix: outbound also re-evaluates allow_servers
@@ -437,12 +525,8 @@ pub async fn run_proxy(
                     let result: ScanResult =
                         scanner_out.scan_with_opts(trimmed, pol.scan_unicode, pol.scan_confusable);
                     if !result.matched_patterns.is_empty() {
-                        // Note (Analyst observation 7): outbound intentionally
-                        // applies only the *global* allow_patterns — never the
-                        // per-tool allowlist — because outbound traffic is
-                        // server→client and tool-name attribution is unreliable
-                        // (the server may emit unrelated diagnostics). Outbound
-                        // is also warn-only: matches never block, only log.
+                        // Outbound is warn-only (server→client traffic,
+                        // tool-name attribution unreliable).
                         let allow_pattern = result
                             .matched_patterns
                             .iter()
@@ -465,30 +549,53 @@ pub async fn run_proxy(
                     }
                 }
 
-                // v0.5 Layer 7 — Tools-list schema-drift detection.
-                // Runs only when the envelope looks like a tools/list
-                // response (cheap structural pre-gate) and mode != Off.
-                // Decoupled from the scanner above so allowlisted
-                // servers still get drift coverage — rug-pulls don't
-                // care about `allow_servers`.
-                if pol.tools_list_drift_detection != DriftMode::Off {
+                // v0.5 Layer 7 + v0.6 fingerprint-meta — tools/list
+                // schema-drift detection. Runs only when the envelope
+                // looks like a tools/list response (cheap structural
+                // pre-gate) and mode != Off. Decoupled from the
+                // scanner above so allowlisted servers still get drift
+                // coverage — rug-pulls don't care about `allow_servers`.
+                if pol.tools_list_drift_detection != DriftMode::Off || pol.inject_fingerprint_meta {
                     if let Ok(envelope) = serde_json::from_str::<Value>(trimmed) {
-                        drift_replacement = run_drift_check(
+                        drift_decision = run_drift_check(
                             &program_for_out,
                             &envelope,
-                            pol.tools_list_drift_detection,
+                            &pol,
                             &drift_history_path_out,
                         );
                     }
                 }
             }
-            let payload = match drift_replacement {
-                Some(replacement) => {
-                    let mut s = serde_json::to_string(&replacement)?;
-                    s.push('\n');
-                    s
-                }
-                None => {
+            // v0.6 R1 Critic-MED + Analyst-W1 fix — split the
+            // `Replace | PassThroughWithMeta` OR-arm into two distinct
+            // arms. The serialisation step is identical *today*
+            // (both variants carry a `Value` that we encode + append
+            // a newline), but the semantics differ:
+            //
+            //   `Replace`               = BLOCK (JSON-RPC error -32001)
+            //   `PassThroughWithMeta`   = ENRICH (success + _meta stamp)
+            //
+            // A future contributor adding per-decision-type tracing,
+            // audit-log entries, or OTLP block-span labelling needs
+            // the structural split to land BEFORE making that change.
+            // The shared local + identical body keep behaviour
+            // byte-identical to the v0.6.0-pre-R1 collapsed version.
+            let encode = |v: &Value| -> Result<String, ArmorError> {
+                let mut s = serde_json::to_string(v)?;
+                s.push('\n');
+                Ok(s)
+            };
+            let payload = match drift_decision {
+                // BLOCK — replace the original line with the
+                // JSON-RPC error envelope built by
+                // `drift::drift_block_response`.
+                DriftDecision::Replace(replacement) => encode(&replacement)?,
+                // ENRICH — replace the original line with the
+                // _meta-stamped clone built by
+                // `drift::inject_fingerprint_meta`.
+                DriftDecision::PassThroughWithMeta(stamped) => encode(&stamped)?,
+                // PASS THROUGH — emit the original line unchanged.
+                DriftDecision::PassThrough => {
                     let mut s = line;
                     s.push('\n');
                     s

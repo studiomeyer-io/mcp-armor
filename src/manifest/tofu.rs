@@ -42,10 +42,10 @@
 //! continuity for sigstore-signed manifests.
 
 use crate::error::ArmorError;
+use crate::util::now_iso as util_now_iso;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current schema version of the on-disk keystore. Bump on incompatible
 /// format change; v0.2 ships with schema 1.
@@ -262,6 +262,21 @@ impl Keystore {
     ///
     /// Returns the in-memory keystore that was just written so callers
     /// can refresh their view without an extra `load()` round-trip.
+    ///
+    /// **v0.6 — deprecated.** Bare `persist_locked` writes the entire
+    /// in-memory snapshot back to disk under the flock, but a
+    /// concurrent CLI `keystore pin` that flushed between this
+    /// caller's `load()` and `persist()` would have its addition
+    /// silently overwritten. New callers should use
+    /// [`Keystore::persist_locked_merge`] which re-loads under the
+    /// lock and merges concurrent additions before writing. The bare
+    /// path stays available for single-process tests + legacy contexts
+    /// (e.g. the `Cmd::Verify --pin-on-first-use` flow which already
+    /// owns its load → mutate → persist sequence end-to-end).
+    #[deprecated(
+        since = "0.6.0",
+        note = "use `Keystore::persist_locked_merge` for multi-process safety; bare `persist_locked` overwrites concurrent additions"
+    )]
     pub fn persist_locked(&self, path: &Path) -> Result<(), ArmorError> {
         use fs2::FileExt;
         let parent = path
@@ -293,6 +308,100 @@ impl Keystore {
         let result = self.persist(path);
         // Lock is released automatically on file drop, but we want any
         // file-handle error visible — surface it after the persist result.
+        let _ = fs2::FileExt::unlock(&lock_file);
+        result
+    }
+
+    /// v0.6 — concurrent-safe persist with merge. Mirrors the
+    /// `History::persist_locked_merge` recipe from `manifest::drift`:
+    ///
+    /// 1. acquire exclusive flock on the sibling `.keys.toml.lock`,
+    /// 2. re-load the on-disk keystore (catches any pin a racing CLI
+    ///    invocation flushed between this caller's load and persist),
+    /// 3. merge: for each entry in the freshly-loaded disk-keystore
+    ///    whose `server_name` is NOT already present in `self`, append
+    ///    it. Entries the caller already has WIN on collision (the
+    ///    caller's post-mutation snapshot is by definition newer than
+    ///    whatever disk holds, otherwise the caller would not be
+    ///    persisting),
+    /// 4. write the merged result atomically,
+    /// 5. release the lock.
+    ///
+    /// Returns `()`. The merged keystore is `*self` after the call.
+    pub fn persist_locked_merge(&mut self, path: &Path) -> Result<(), ArmorError> {
+        use fs2::FileExt;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| {
+                ArmorError::InvalidPattern(format!(
+                    "keystore path {} has no parent directory",
+                    path.display()
+                ))
+            })?;
+        std::fs::create_dir_all(parent)?;
+        let lock_path = parent.join(".keys.toml.lock");
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.mode(KEYSTORE_MODE);
+        }
+        let lock_file = open_opts.open(&lock_path)?;
+        lock_file
+            .lock_exclusive()
+            .map_err(|e| ArmorError::InvalidPattern(format!("flock keystore: {e}")))?;
+        // Re-load under the lock so any pin a racing writer flushed
+        // becomes visible before we serialise our snapshot.
+        let disk = match Self::load(path) {
+            Ok(k) => k,
+            Err(e) => {
+                let _ = fs2::FileExt::unlock(&lock_file);
+                return Err(e);
+            }
+        };
+        // Merge: append disk entries we don't already have.
+        // Our entries win on collision because `self` is the
+        // post-mutation snapshot — overriding it with a stale disk
+        // value would silently lose the caller's change.
+        //
+        // v0.6 R1 Critic H1 fix: when a disk entry has the same
+        // `server_name` as one of ours but a DIFFERENT fingerprint,
+        // we still drop the disk entry (our pin wins) — but the
+        // collision is now surfaced via `tracing::warn!` instead of
+        // happening silently. This catches the "two admins
+        // simultaneously pin the same server under different keys"
+        // race that the silent-discard path masked.
+        for entry in disk.entries {
+            match self
+                .entries
+                .iter()
+                .find(|e| e.server_name == entry.server_name)
+            {
+                None => {
+                    self.entries.push(entry);
+                }
+                Some(ours) if ours.key_fingerprint != entry.key_fingerprint => {
+                    tracing::warn!(
+                        server_name = %entry.server_name,
+                        disk_fingerprint = %entry.key_fingerprint,
+                        kept_fingerprint = %ours.key_fingerprint,
+                        path = %path.display(),
+                        "persist_locked_merge: server_name collision with conflicting fingerprint — disk entry discarded, caller's pin wins. The other process pinned a different key under this name; investigate before promoting either."
+                    );
+                }
+                Some(_) => {
+                    // Same server_name + same fingerprint = legitimate
+                    // idempotent collision. Skip silently.
+                }
+            }
+        }
+        let result = self.persist(path);
         let _ = fs2::FileExt::unlock(&lock_file);
         result
     }
@@ -384,50 +493,16 @@ pub fn default_path() -> PathBuf {
     PathBuf::from("keys.toml")
 }
 
+// v0.6 — local `format_rfc3339_utc` + `civil_from_days` collapsed into
+// `crate::util`. The `now_iso` shim below preserves the public API for
+// `main.rs` + tests. The dependency-direction note from v0.2 (manifest
+// must not import control) still holds; `crate::util` lives below
+// both so the layering is intact.
+
 /// Construct an RFC-3339 UTC timestamp ready for `pinned_at_iso`.
-///
-/// v0.2 (Round 1 review fix — Analyst observation 4): inlined the
-/// chrono-free Howard-Hinnant civil-from-days formatter rather than
-/// importing it from `crate::control::history`. The previous import
-/// inverted the module layering (`manifest` is supposed to sit *below*
-/// `control`, not depend on it).
+#[must_use]
 pub fn now_iso() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    format_rfc3339_utc(secs)
-}
-
-/// RFC-3339 UTC formatter — Howard-Hinnant civil-from-days algorithm,
-/// chrono-free. Sibling of `control::history::format_rfc3339_utc` (both
-/// modules need their own copy because of the dependency direction).
-fn format_rfc3339_utc(unix_secs: i64) -> String {
-    let secs_per_day: i64 = 86_400;
-    let days = unix_secs.div_euclid(secs_per_day);
-    let secs_in_day = unix_secs.rem_euclid(secs_per_day);
-    let hour = secs_in_day / 3600;
-    let minute = (secs_in_day % 3600) / 60;
-    let second = secs_in_day % 60;
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Reference: <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>
-/// `doe` / `doy` are the canonical variable names from Hinnant's algorithm;
-/// renaming them would obscure the reference implementation.
-#[allow(clippy::similar_names)]
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = y + i64::from(u8::from(m <= 2));
-    (year, m, d)
+    util_now_iso()
 }
 
 #[cfg(test)]

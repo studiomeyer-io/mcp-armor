@@ -267,6 +267,13 @@ fn tool_get_policy(policy: &Policy) -> Value {
     // `tools_list_drift_detection` (Layer 7 mode). Without these, an
     // operator using `armor_get_policy` to verify their setup would
     // see only half the configuration.
+    // v0.6 surfaces every drift-related toggle that the proxy hot
+    // path consults so an operator inspecting the live config sees
+    // the full v0.6 surface area in one call:
+    // - tools_list_drift_inbound_check (item 5 of the v0.6 backlog)
+    // - tools_list_hash_backend (BLAKE3 vs SHA-256 for FIPS)
+    // - tools_list_jcs_canonicalize (RFC 8785)
+    // - inject_fingerprint_meta (SEP-2659)
     json!({
         "policy_path": crate::policy::loader::default_path().display().to_string(),
         "rules": {
@@ -279,6 +286,10 @@ fn tool_get_policy(policy: &Policy) -> Value {
         "scan_confusable": policy.scan_confusable,
         "deny_env_keys": policy.deny_env_keys,
         "tools_list_drift_detection": policy.tools_list_drift_detection,
+        "tools_list_drift_inbound_check": policy.tools_list_drift_inbound_check,
+        "tools_list_hash_backend": policy.tools_list_hash_backend,
+        "tools_list_jcs_canonicalize": policy.tools_list_jcs_canonicalize,
+        "inject_fingerprint_meta": policy.inject_fingerprint_meta,
         "version": policy.version
     })
 }
