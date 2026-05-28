@@ -32,6 +32,14 @@ ignore = [
     # Place RUSTSEC-IDs here ONLY with a dated note + planned fix.
     # Example (do NOT enable without rationale):
     # "RUSTSEC-2024-XXXX",  # 2026-05-22: tracked via #issue-N, fix in v0.3.1
+    #
+    # v0.4 — `paste 1.0.15` was archived upstream (dtolnay/paste). It is
+    # pulled in transitively from `rmcp 0.1.5` which we ship behind the
+    # opt-in `rmcp-control` feature; the v0.5 backlog migrates the
+    # control-plane to `rmcp 1.7.0` (official MCP Rust SDK), which drops
+    # the `paste` dep. Until then this advisory is tracked but not
+    # build-blocking. Re-evaluate when the v0.5 rmcp upgrade lands.
+    "RUSTSEC-2024-0436",
 ]
 
 # ── Bans (operator deny-list) ───────────────────────────────────────
@@ -55,9 +63,16 @@ allow-git = []
 
 # ── Licenses ────────────────────────────────────────────────────────
 [licenses]
-# License IDs follow SPDX. Allowlist matches everything currently in
-# the v0.2 dep tree (cargo tree --target all). Adding a new dep that
-# carries a license not on this list will fail the gate.
+# License IDs follow SPDX. Allowlist matches every license currently in
+# the v0.4 dep tree (`cargo tree --target all --all-features`) plus a
+# small forward-compat buffer (`MPL-2.0`, `Unicode-DFS-2016`) so the
+# next dep upgrade that pulls a Mozilla-licensed util or an older ICU
+# data crate does not break the gate over a clearly-safe license. The
+# cargo-deny `license-not-encountered` warning for those two entries
+# is expected and acceptable.
+#
+# Adding a new dep that carries a license NOT on this list will fail
+# the gate.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -70,6 +85,14 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # v0.4 — `webpki-roots` (Mozilla root cert bundle, pulled in via
+    # `hyper-rustls` / `reqwest`) re-licensed to CDLA-Permissive-2.0
+    # starting with the 1.x line. CDLA-Permissive-2.0 is the Community
+    # Data License Agreement Permissive 2.0 — an OSI-conformant,
+    # very-permissive licence designed for data bundles. Safe to
+    # combine with MIT-licensed code; the OSI / Linux Foundation
+    # endorse it for projects that ship curated data alongside source.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 exceptions = []

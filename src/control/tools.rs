@@ -151,6 +151,24 @@ pub fn list() -> Value {
                     "readOnlyHint": true,
                     "destructiveHint": false
                 }
+            },
+            {
+                "name": "armor_get_drift_history",
+                "description": "v0.5 Layer 7 — Inspect the tools-list schema-drift baselines persisted by `mcp-armor wrap`. Read-only. Optional `program` arg narrows the report to one upstream; omit it to list every pinned baseline. Closes the Rug-Pull / Silent-Redefinition threat class (Invariant Labs, CyberArk Full-Schema Poisoning).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "program": {
+                            "type": "string",
+                            "description": "When set, return the full per-tool fingerprint detail for one program. When omitted, return a summary list of every pinned baseline."
+                        }
+                    },
+                    "additionalProperties": false
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "destructiveHint": false
+                }
             }
         ]
     })
@@ -161,13 +179,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_has_nine_entries_v02() {
+    fn list_has_ten_entries_v05() {
         let v = list();
         let arr = v["tools"].as_array().expect("array");
         assert_eq!(
             arr.len(),
-            9,
-            "v0.2 expects 9 control-plane tools (6 v0.1 + 3 v0.2)"
+            10,
+            "v0.5 expects 10 control-plane tools (6 v0.1 + 3 v0.2 + 1 v0.5 drift)"
         );
         let names: Vec<&str> = arr
             .iter()
@@ -183,6 +201,7 @@ mod tests {
             "armor_get_keystore",
             "armor_verify_bundle",
             "armor_rekor_lookup",
+            "armor_get_drift_history",
         ] {
             assert!(names.contains(&required), "missing tool: {required}");
         }

@@ -164,8 +164,18 @@ const CONFUSABLES: &[(char, char)] = &[
     ('\u{2C30}', 'A'), // Ⰰ GLAGOLITIC CAPITAL LETTER AZU
 ];
 
-/// Lazily-built lookup table. Building from the `CONFUSABLES` slice
-/// happens once on the first call and is then memoised.
+/// v0.4 — kept `OnceLock<Vec<(char, char)>>` even after a Round-3
+/// reviewer suggested searching the `&'static CONFUSABLES` slice
+/// directly. The table is currently organised by Unicode block
+/// (Cyrillic small / Cyrillic capital / Greek small / ...) rather than
+/// strictly ascending codepoint order, so an unguarded `binary_search`
+/// on the literal would silently return wrong answers. Sorting + dedup
+/// at first-call into a `OnceLock` is a one-shot ~3 µs cost that
+/// amortises across the lifetime of the process — well under any
+/// hot-path budget. If we ever re-curate the table to be block-and-
+/// codepoint-sorted at the source, the `confusables_table_is_sorted_and_deduped`
+/// test below will start passing on the raw slice and we can drop the
+/// `OnceLock`.
 fn lookup() -> &'static [(char, char)] {
     static CELL: OnceLock<Vec<(char, char)>> = OnceLock::new();
     let v = CELL.get_or_init(|| {
@@ -309,5 +319,37 @@ mod tests {
             let twice = skeleton(&once);
             assert_eq!(once, twice, "non-idempotent on {c:?}");
         }
+    }
+
+    /// v0.4 invariant — there must be no duplicate `from` codepoints in
+    /// the raw `CONFUSABLES` table. The `OnceLock`-backed `lookup()`
+    /// deduplicates silently, but a silent dedup hides a real curator
+    /// mistake (two different ASCII mappings for the same codepoint
+    /// would race on which one wins after sort). This test makes that
+    /// failure mode an explicit CI gate.
+    ///
+    /// We deliberately do NOT enforce ascending codepoint order today —
+    /// the table is curated by Unicode block (Cyrillic / Greek /
+    /// Cherokee / ...) and `lookup()` sorts at first call. If we ever
+    /// re-curate to strict ascending order, swap the OnceLock-backed
+    /// `lookup()` for direct `binary_search` on the `&'static` slice
+    /// and assert ordering here.
+    #[test]
+    fn confusables_table_has_no_duplicate_from_codepoints() {
+        use std::collections::HashSet;
+        let mut seen: HashSet<char> = HashSet::with_capacity(CONFUSABLES.len());
+        let mut dups: Vec<char> = Vec::new();
+        for (from, _) in CONFUSABLES {
+            if !seen.insert(*from) {
+                dups.push(*from);
+            }
+        }
+        assert!(
+            dups.is_empty(),
+            "CONFUSABLES has duplicate `from` codepoints: {:?} — remove the duplicates so dedup is a no-op",
+            dups.iter()
+                .map(|c| format!("U+{:04X}", *c as u32))
+                .collect::<Vec<_>>()
+        );
     }
 }

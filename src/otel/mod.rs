@@ -1,4 +1,4 @@
-//! Telemetry initialisation — v0.2 wires real OTLP gRPC export.
+//! Telemetry initialisation — v0.4 runs on `opentelemetry 0.30`.
 //!
 //! ## Two compile-time modes
 //!
@@ -9,11 +9,31 @@
 //! - **`--features otlp`**: in addition to the stderr layer, an OTLP gRPC
 //!   exporter is wired against `$OTEL_EXPORTER_OTLP_ENDPOINT` using the
 //!   official `opentelemetry-otlp` crate with `grpc-tonic`. Spans are
-//!   batched via `BatchSpanProcessor` on the tokio runtime so the scanner
-//!   hot-path never blocks on a flush. The exporter is **only installed
-//!   when the env var is set** — if it is unset, the otlp-feature build
-//!   behaves identically to the default build (the dependencies are pulled
-//!   in but no provider is constructed).
+//!   batched via the async-runtime variant of `BatchSpanProcessor` on the
+//!   tokio runtime so the scanner hot-path never blocks on a flush. The
+//!   exporter is **only installed when the env var is set** — if it is
+//!   unset, the otlp-feature build behaves identically to the default
+//!   build (the dependencies are pulled in but no provider is constructed).
+//!
+//! ## v0.4 — 0.27 → 0.30 SDK migration (closes the shutdown-hang class)
+//!
+//! The 0.27 line had a known shutdown-deadlock when the BatchSpanProcessor
+//! ran on the tokio runtime and the collector was unreachable
+//! (open-telemetry/opentelemetry-rust#2071 + #2798). The 0.28 release
+//! restructured BatchSpanProcessor / PeriodicReader to run on a dedicated
+//! background thread by default. We migrated to 0.30 directly, which is
+//! the LTS-shaped step that ships the deadlock fix without the metrics-SDK
+//! churn of 0.31 / 0.32. We opted in to the
+//! `experimental_trace_batch_span_processor_with_async_runtime` feature so
+//! the proxy hot-path keeps the previous async-flush semantics — the
+//! shutdown deadlock is still gone because we no longer block on the
+//! `tokio::main` runtime during process tear-down.
+//!
+//! Other SDK renames absorbed in v0.4:
+//! - `TracerProvider` → `SdkTracerProvider`
+//! - `Resource::new(...)` (deprecated) → `Resource::builder().with_service_name().with_attributes().build()`
+//! - `provider.shutdown()` returns `OTelSdkResult` (no longer a void)
+//! - `TraceError` (return type from exporter build) → `OTelSdkError`
 //!
 //! ## Hot-path budget
 //!
@@ -27,16 +47,16 @@
 //!
 //! ## Why not `tracing-opentelemetry`?
 //!
-//! The 0.32 release of `tracing-opentelemetry` would let us bridge existing
+//! The 0.33 release of `tracing-opentelemetry` would let us bridge existing
 //! `tracing::warn!` events automatically, but it adds another crate to the
-//! audit surface. v0.2 emits OTLP spans manually via [`emit_block_span`] at
+//! audit surface. We emit OTLP spans manually via [`emit_block_span`] at
 //! the small set of sites that actually need a span (block decisions, plus
-//! TOFU verify mismatches). v0.3 may revisit if the call-site count grows
+//! TOFU verify mismatches). v0.5 may revisit if the call-site count grows
 //! beyond ~10.
 //!
-//! ## v0.3 backlog (documented openly)
+//! ## v0.5 backlog (documented openly)
 //!
-//! - `tracing-opentelemetry` bridge for automatic span emission.
+//! - `tracing-opentelemetry 0.33` bridge for automatic span emission.
 //! - Span exemplars for the scanner-latency histogram (today emitted as a
 //!   single `latency_us` attribute on the block-span).
 //! - mTLS client cert for OTLP gRPC (today: TLS via tonic native-roots).
@@ -53,10 +73,14 @@ mod exporter;
 /// Guard returned from [`init`]. Holds the OTLP-active flag plus, when the
 /// `otlp` feature is enabled, the SDK tracer provider so its `shutdown()`
 /// is called on Drop. Without the feature it is an empty marker.
+///
+/// v0.4 — `provider` is now an [`opentelemetry_sdk::trace::SdkTracerProvider`]
+/// (renamed in 0.28). `shutdown()` returns an `OTelSdkResult`; we swallow
+/// any error since this is a best-effort flush during process teardown.
 pub struct OtelGuard {
     otlp_active: bool,
     #[cfg(feature = "otlp")]
-    provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+    provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
 }
 
 impl OtelGuard {
@@ -72,8 +96,11 @@ impl Drop for OtelGuard {
         {
             if let Some(provider) = self.provider.take() {
                 // Best-effort: a hung collector must not block process
-                // shutdown — `shutdown_tracer_provider` already wraps the
-                // call in a timeout.
+                // shutdown. The v0.4 SDK runs the BatchSpanProcessor on a
+                // dedicated background thread (or the experimental async
+                // runtime we opted in to), so this returns promptly even
+                // when the collector is unreachable — closing the v0.3
+                // shutdown-hang class.
                 let _ = provider.shutdown();
             }
         }
@@ -102,7 +129,7 @@ pub fn init() -> Result<OtelGuard, ArmorError> {
     {
         // OTLP feature path.
         let mut otlp_active = false;
-        let mut provider: Option<opentelemetry_sdk::trace::TracerProvider> = None;
+        let mut provider: Option<opentelemetry_sdk::trace::SdkTracerProvider> = None;
         if let Some(ref endpoint) = otlp_endpoint {
             match exporter::init_provider(endpoint) {
                 Ok(p) => {

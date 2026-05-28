@@ -19,10 +19,12 @@
 //! poisoning class.
 
 pub mod canonical;
+pub mod drift;
 pub mod ed25519;
 pub mod sigstore;
 pub mod tofu;
 
 pub use canonical::canonicalize_json;
+pub use drift::{DriftDetail, DriftKind, DriftMode, History as DriftHistory, ProgramBaseline};
 pub use ed25519::{verify, verify_with_tofu, TofuVerifyOutcome, VerifyOutcome};
 pub use tofu::{Keystore, PinOutcome, PinnedKey, VerifyPin};

@@ -6,7 +6,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/studiomeyer-io/mcp-armor/badge)](https://scorecard.dev/viewer/?uri=github.com/studiomeyer-io/mcp-armor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (with **TOFU keystore + Sigstore Rekor bridge** since v0.2), exports **OTLP gRPC telemetry**, blocks marketplace-poisoning vectors, **strips loader-class env keys from spawned children** (`LD_PRELOAD`, `NODE_OPTIONS`, … — new in v0.3), folds **Unicode confusables to detect homoglyph evasion** (Cyrillic `іgnоrе` ≈ `ignore` — new in v0.3). Single signed binary, p99 budget under 5 ms.
+Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (with **TOFU keystore + Sigstore Rekor bridge** since v0.2), exports **OTLP gRPC telemetry** (on `opentelemetry 0.30` since v0.4 — closes the shutdown-hang class), blocks marketplace-poisoning vectors, **strips loader-class env keys from spawned children** (`LD_PRELOAD`, `NODE_OPTIONS`, … — new in v0.3), folds **Unicode confusables to detect homoglyph evasion** (Cyrillic `іgnоrе` ≈ `ignore` — new in v0.3). Single signed binary, p99 budget under 5 ms.
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
@@ -262,34 +262,52 @@ cargo test --all-features
 cargo bench --bench scanner
 ```
 
-164 tests pass on the default build (133 lib + 31 integration), 163 with `--all-features` (one `cfg(not(feature = "sigstore-bridge"))` test correctly skipped). Per-feature breakdown in CHANGELOG v0.3.0 "Tests".
+173 tests pass on the default build (lib + 8 v0.4 regressions in
+`tests/integration_v04_features.rs` + the rest of the v0.2/v0.3
+integration suite), 172 with `--all-features` (one
+`cfg(not(feature = "sigstore-bridge"))` test correctly skipped). Per-
+feature breakdown in CHANGELOG v0.4.0 "Pre-tag gates run locally".
 
 ## Status
 
-**v0.3.x — early production.** The four-stage scanner, Ed25519 verify, TOFU keystore, Sigstore bundle parser, OTLP exporter, the 9-tool control-plane, loader-class env-key strip, and UTS-39 confusable defence are all stable enough for daily use as a stdio sidecar in front of trusted MCP servers. v0.3 backlog items are documented openly in CHANGELOG.
+**v0.4.x — production.** The four-stage scanner, Ed25519 verify, TOFU
+keystore (now `flock`-protected on concurrent pin), Sigstore bundle
+parser, OTLP exporter (on the `opentelemetry 0.30` SDK with the
+shutdown-hang class closed), the 9-tool control-plane, loader-class
+env-key strip, and UTS-39 confusable defence are all stable for daily
+use as a stdio sidecar in front of trusted MCP servers. v0.4 cashes in
+every documented v0.3-backlog item except the rmcp 1.x SDK migration
+and the Rekor-v2 tiles verifier, both of which are now v0.5 backlog
+with concrete crate targets (see CHANGELOG).
 
 | Area | Status |
 |---|---|
 | stdio proxy + scanner pipeline (4 stages) | shipped, p99 < 5 ms enforced in CI |
 | Ed25519 manifest verify (stateless) | shipped |
 | TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | shipped in v0.2 |
+| **TOFU `flock`-protected concurrent pin (`persist_locked`)** | **shipped in v0.4** |
 | Sigstore bundle parser + structural Rekor SET verify | shipped in v0.2 (offline, always available) |
+| **`verify_inclusion.shape_only_ok` rename + mandatory `warning` field** | **shipped in v0.4** |
 | Sigstore Rekor REST lookup-by-hash | shipped in v0.2 behind `--features sigstore-bridge` |
-| OTLP gRPC export (BatchSpanProcessor::Tokio) | shipped in v0.2 behind `--features otlp` |
-| rmcp control-plane (minimal `ServerHandler`) | shipped in v0.2 behind `--features rmcp-control` |
+| **OTLP gRPC export on `opentelemetry-otlp 0.30`** | **shipped in v0.4** (closes the v0.27 shutdown-hang class) |
+| rmcp control-plane (minimal `ServerHandler`) | scaffold-only since v0.2 behind `--features rmcp-control`, real migration is v0.5 |
 | Per-tool pattern allowlist | shipped in v0.2 |
 | SIGHUP policy reload (Unix) | shipped in v0.2 |
 | `armor_check_cve` semver-range matching | shipped in v0.2 |
-| **Loader-class env-key strip on `wrap`** | **shipped in v0.3** |
-| **UTS-39 confusable skeleton (Stage 4)** | **shipped in v0.3** |
-| **Supply-chain CI (CycloneDX SBOM + OSV + cargo-deny + Scorecard)** | **shipped in v0.3** |
-| Fulcio cert-chain verification | v0.4 backlog |
-| Rekor v2 tiles-based verifier (consistency-proof + `/api/v2/tile/…`) | v0.4 backlog (re-scoped from v0.3 — see CHANGELOG) |
-| rmcp `#[tool_router]` macro path | v0.4 backlog — awaits rmcp 1.x stable on crates.io |
-| Windows targets | v0.4 backlog — Linux + macOS only |
-| `tracing-opentelemetry` auto-bridge | v0.4 backlog |
-| mTLS client cert for OTLP gRPC | v0.4 backlog |
-| Hand-rolled SHA-256 → `sha2 = "0.10"` | v0.4 backlog |
+| Loader-class env-key strip on `wrap` | shipped in v0.3 |
+| UTS-39 confusable skeleton (Stage 4) | shipped in v0.3 |
+| Supply-chain CI (CycloneDX SBOM + OSV + cargo-deny + Scorecard) | shipped in v0.3 |
+| **Audit-trail SHA-256 on RustCrypto `sha2` (replaces hand-rolled)** | **shipped in v0.4** |
+| **Parent-dir `fsync` after keystore atomic rename** | **shipped in v0.4** |
+| **`PIN_OUTCOME_*` public constants instead of magic strings** | **shipped in v0.4** |
+| **Proxy `tokio::join!` + explicit child kill/wait (zombie-child fix)** | **shipped in v0.4** |
+| rmcp `#[tool_router]` macro path (`rmcp 1.7.0` upstream-stable) | v0.5 backlog |
+| Rekor v2 tiles-based verifier via `sigstore-rekor 0.8` | v0.5 backlog |
+| Cryptographic SET verify against Rekor pubkey (TUF) | v0.5 backlog |
+| Fulcio cert-chain verification | v0.5 backlog |
+| `tracing-opentelemetry 0.33` auto-bridge | v0.5 backlog |
+| mTLS client cert for OTLP gRPC | v0.5 backlog |
+| Windows targets | v0.5 backlog — Linux + macOS only |
 
 Security disclosure policy: [SECURITY.md](SECURITY.md). Contributing
 guide: [CONTRIBUTING.md](CONTRIBUTING.md).

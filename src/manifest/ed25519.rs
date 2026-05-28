@@ -28,6 +28,14 @@ pub struct TofuVerifyOutcome {
     /// Short blake3-derived fingerprint of the supplied public key.
     pub key_fingerprint: String,
     /// `NewlyPinned` / `AlreadyPinned` / `null` if pinning was not attempted.
+    ///
+    /// v0.4 (Round-3 review MED fix) — values now come from the
+    /// [`PIN_OUTCOME_NEWLY_PINNED`] / [`PIN_OUTCOME_ALREADY_PINNED`]
+    /// constants so the few call-sites that branch on the string
+    /// (`main.rs` operator messages, JSON consumers) don't carry magic
+    /// literals that could silently drift. Field type stays
+    /// `Option<&'static str>` so the JSON shape is unchanged — only
+    /// the producer/consumer reference the same constants.
     pub pin_outcome: Option<&'static str>,
     /// Free-form reason when `valid=false` (e.g. fingerprint mismatch).
     pub error: Option<String>,
@@ -39,6 +47,16 @@ pub struct TofuVerifyOutcome {
     /// the marketplace-mirror swap case to the audit log.
     pub previously_pinned_fingerprint: Option<String>,
 }
+
+/// `TofuVerifyOutcome::pin_outcome` value emitted when a key was just
+/// freshly pinned in the current verify call. Mirrored to `main.rs` so
+/// the operator-message branch never drifts from the producer.
+pub const PIN_OUTCOME_NEWLY_PINNED: &str = "newly_pinned";
+
+/// `TofuVerifyOutcome::pin_outcome` value emitted when the supplied key
+/// matched an entry that was already in the keystore — verify succeeds
+/// without modifying the on-disk state.
+pub const PIN_OUTCOME_ALREADY_PINNED: &str = "already_pinned";
 
 /// Verify an Ed25519 signature over the canonical-JSON form of a
 /// `tools/list` response. The signature and public key are passed as base64.
@@ -140,7 +158,11 @@ pub fn verify_with_tofu(
 
     let (valid, pin_outcome, error): (bool, Option<&'static str>, Option<String>) = match pin_status
     {
-        VerifyPin::Match => (crypto.valid, Some("already_pinned"), crypto.error.clone()),
+        VerifyPin::Match => (
+            crypto.valid,
+            Some(PIN_OUTCOME_ALREADY_PINNED),
+            crypto.error.clone(),
+        ),
         VerifyPin::FingerprintMismatch { expected, found } => (
             false,
             None,
@@ -162,8 +184,8 @@ pub fn verify_with_tofu(
                 pinned_at_iso: crate::manifest::tofu::now_iso(),
             })?;
             let tag = match outcome {
-                PinOutcome::NewlyPinned => "newly_pinned",
-                PinOutcome::AlreadyPinned => "already_pinned",
+                PinOutcome::NewlyPinned => PIN_OUTCOME_NEWLY_PINNED,
+                PinOutcome::AlreadyPinned => PIN_OUTCOME_ALREADY_PINNED,
             };
             (true, Some(tag), None)
         }

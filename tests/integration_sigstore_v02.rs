@@ -20,7 +20,10 @@ fn bundle_minimal_signature_only_parses_cleanly() {
 
 #[test]
 fn bundle_with_rekor_section_parses_log_index_and_integrated_time() {
-    // Use a 64-byte SET so structural verify says structural_ok=true.
+    // v0.4 — field renamed: `structural_ok` → `shape_only_ok` to make
+    // the "this is not a cryptographic verify" semantic obvious in JSON
+    // consumers. Bundle still has the 64-byte SET so the shape check
+    // passes.
     let raw_sig = vec![0xab_u8; 64];
     let b64_sig = B64.encode(&raw_sig);
     let raw = serde_json::json!({
@@ -37,10 +40,14 @@ fn bundle_with_rekor_section_parses_log_index_and_integrated_time() {
     .to_string();
     let b = Bundle::parse(&raw).expect("parse");
     let inc = verify_inclusion(&b).expect("verify");
-    assert!(inc.structural_ok);
+    assert!(inc.shape_only_ok);
     assert!(
         inc.partial,
-        "v0.2 is partial pending v0.3 Rekor-pubkey verify"
+        "v0.4 stays partial pending v0.5 Rekor-pubkey verify"
+    );
+    assert!(
+        !inc.warning.is_empty(),
+        "v0.4: warning string must accompany every InclusionOutcome"
     );
     assert_eq!(inc.log_index, Some(4242));
     assert_eq!(inc.integrated_time, Some(1_700_000_000));

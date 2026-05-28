@@ -12,6 +12,7 @@ pub mod tools;
 
 use crate::cve::FEED;
 use crate::error::ArmorError;
+use crate::manifest::drift::{default_path as drift_default_path, History as DriftHistory};
 use crate::manifest::sigstore::Bundle;
 #[cfg(feature = "sigstore-bridge")]
 use crate::manifest::sigstore::RekorLookup;
@@ -176,6 +177,7 @@ fn dispatch_tool(
         "armor_get_keystore" => tool_get_keystore(args),
         "armor_verify_bundle" => tool_verify_bundle(args),
         "armor_rekor_lookup" => tool_rekor_lookup(args),
+        "armor_get_drift_history" => tool_get_drift_history(args),
         _ => Err(ArmorError::UnknownTool(name.to_string())),
     }
 }
@@ -253,14 +255,30 @@ fn tool_list_blocked(args: &Value, history: &ScanHistory) -> Value {
 }
 
 fn tool_get_policy(policy: &Policy) -> Value {
+    // v0.4 (Round-3 review MEDIUM fix): `{:?}` emits the PathBuf with
+    // Debug-quoting, e.g. `"/home/user/.config/...toml"`. Other tools
+    // (`tool_get_keystore`) consistently use `.display()` which renders
+    // the path verbatim. Aligning here removes the cosmetic drift and
+    // avoids surprising JSON consumers.
+    //
+    // v0.5 R1 Analyst-W5 fix: surface every policy field that actually
+    // gates proxy behaviour — `scan_confusable` (Stage 4 on/off),
+    // `deny_env_keys` (Feature A loader-class strip), and
+    // `tools_list_drift_detection` (Layer 7 mode). Without these, an
+    // operator using `armor_get_policy` to verify their setup would
+    // see only half the configuration.
     json!({
-        "policy_path": format!("{:?}", crate::policy::loader::default_path()),
+        "policy_path": crate::policy::loader::default_path().display().to_string(),
         "rules": {
             "allow_patterns": policy.allow_patterns,
-            "allow_servers": policy.allow_servers
+            "allow_servers": policy.allow_servers,
+            "allow_patterns_per_tool": policy.allow_patterns_per_tool
         },
         "fail_mode": policy.fail_mode,
         "scan_unicode": policy.scan_unicode,
+        "scan_confusable": policy.scan_confusable,
+        "deny_env_keys": policy.deny_env_keys,
+        "tools_list_drift_detection": policy.tools_list_drift_detection,
         "version": policy.version
     })
 }
@@ -316,11 +334,24 @@ fn tool_check_cve(args: &Value) -> Result<Value, ArmorError> {
             "affected_versions": cve.affected_versions
         }));
     }
+    // v0.5 R2 Analyst-W2 fix: the feed is no longer OX-only. The
+    // 2026-05-28 refresh wave merged in Lyrie MCP-1.4 batch + rmcp
+    // DNS-rebinding + n8n-mcp credential leak + Excel-MCP path
+    // traversal entries. Surface the full provenance list so tool
+    // consumers know which advisories the answer is grounded in.
     Ok(json!({
         "affected_cves": affected,
         "server_version_queried": server_version,
         "version_match_used": version_match_used,
-        "advisories_consulted": ["ox-advisory-2026-04-15"],
+        "advisories_consulted": [
+            "ox-advisory-2026-04-15",
+            "lyrie-mcp-1.4-batch-2026-04",
+            "nvd-rmcp-cve-2026-42559",
+            "nvd-n8n-mcp-cve-2026-42282",
+            "nvd-excel-mcp-cve-2026-40576",
+            "ultraviolet-cyber-mcp-advisory-2026-05-27"
+        ],
+        "feed_generated": feed.generated,
         "cve_database_age_days": cve_database_age_days(&feed.generated)
     }))
 }
@@ -385,15 +416,75 @@ fn tool_verify_bundle(args: &Value) -> Result<Value, ArmorError> {
         .ok_or_else(|| ArmorError::InvalidPattern("missing bundle_json".into()))?;
     let bundle = Bundle::parse(raw)?;
     let inclusion = crate::manifest::sigstore::verify_inclusion(&bundle)?;
+    // v0.4 (Round-3 review HIGH fix): surface the inclusion `warning` field
+    // and rename `structural_set_ok` → `shape_only_ok`. Consumers reading
+    // the JSON should never mistake the shape check for a cryptographic
+    // verify; the warning string is identical to
+    // `manifest::sigstore::WARNING_SHAPE_ONLY` so it round-trips intact.
     Ok(json!({
         "bundle_parsed": true,
         "has_cert": bundle.cert_pem.is_some(),
         "has_rekor_bundle": bundle.rekor_bundle.is_some(),
-        "structural_set_ok": inclusion.structural_ok,
+        "shape_only_ok": inclusion.shape_only_ok,
         "partial": inclusion.partial,
         "note": inclusion.note,
+        "warning": inclusion.warning,
         "log_index": inclusion.log_index,
         "integrated_time": inclusion.integrated_time,
+    }))
+}
+
+// ──── v0.5 Layer 7 — drift history inspection ────────────────────────────
+
+fn tool_get_drift_history(args: &Value) -> Result<Value, ArmorError> {
+    // Match the keystore tool's stance: never honour a caller-supplied
+    // path. The control plane is documented as read-only inspection;
+    // honouring an arbitrary path would turn this into a generic
+    // TOML-file oracle. Operators configure a non-default path at
+    // startup via `--drift-history` / `MCP_ARMOR_DRIFT_HISTORY`.
+    let path = drift_default_path();
+    let history = DriftHistory::load(&path)?;
+    let program_filter = args.get("program").and_then(Value::as_str);
+
+    if let Some(program) = program_filter {
+        return match history.find(program) {
+            Some(entry) => Ok(json!({
+                "history_path": path.display().to_string(),
+                "schema_version": history.schema_version,
+                "program": entry.program,
+                "baseline_iso": entry.baseline_iso,
+                "last_seen_iso": entry.last_seen_iso,
+                "tools_count": entry.tools_count,
+                "aggregate_hash": entry.aggregate_hash,
+                "tools": entry.tools,
+            })),
+            None => Ok(json!({
+                "history_path": path.display().to_string(),
+                "schema_version": history.schema_version,
+                "program": program,
+                "baseline_present": false,
+            })),
+        };
+    }
+
+    let summary: Vec<Value> = history
+        .programs
+        .iter()
+        .map(|p| {
+            json!({
+                "program": p.program,
+                "tools_count": p.tools_count,
+                "aggregate_hash": p.aggregate_hash,
+                "baseline_iso": p.baseline_iso,
+                "last_seen_iso": p.last_seen_iso,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "history_path": path.display().to_string(),
+        "schema_version": history.schema_version,
+        "count": history.len(),
+        "programs": summary,
     }))
 }
 
@@ -486,15 +577,61 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_returns_nine_tools_in_v02() {
+    fn tools_list_returns_ten_tools_in_v05() {
         let (s, p, h) = make_ctx();
         let req = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
         let resp = handle_request(&req, &s, &p, &h);
         let tools = resp["result"]["tools"].as_array().expect("array");
         assert_eq!(
             tools.len(),
-            9,
-            "v0.2 expects 9 control-plane tools (6 v0.1 + 3 v0.2)"
+            10,
+            "v0.5 expects 10 control-plane tools (6 v0.1 + 3 v0.2 + 1 v0.5 drift)"
+        );
+    }
+
+    /// v0.5 Layer 7 — `armor_get_drift_history` is read-only and returns
+    /// the canonical default path regardless of caller-supplied args
+    /// (mirrors `armor_get_keystore` H1 fix from v0.2 review).
+    #[test]
+    fn armor_get_drift_history_returns_default_path_summary() {
+        let (s, p, h) = make_ctx();
+        let req = json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{
+                "name":"armor_get_drift_history",
+                "arguments":{}
+            }
+        });
+        let resp = handle_request(&req, &s, &p, &h);
+        assert_eq!(resp["result"]["isError"], false);
+        let path = resp["result"]["structuredContent"]["history_path"]
+            .as_str()
+            .expect("history_path");
+        assert!(
+            path.ends_with("tools-history.toml"),
+            "expected default drift history path, got {path}"
+        );
+        assert_eq!(resp["result"]["structuredContent"]["schema_version"], 1);
+    }
+
+    /// v0.5 Layer 7 — when called with a program filter that has no
+    /// pinned baseline, returns `baseline_present: false` cleanly
+    /// instead of erroring out.
+    #[test]
+    fn armor_get_drift_history_unknown_program_returns_baseline_present_false() {
+        let (s, p, h) = make_ctx();
+        let req = json!({
+            "jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{
+                "name":"armor_get_drift_history",
+                "arguments":{"program":"/bin/never-seen-this"}
+            }
+        });
+        let resp = handle_request(&req, &s, &p, &h);
+        assert_eq!(resp["result"]["isError"], false);
+        assert_eq!(
+            resp["result"]["structuredContent"]["baseline_present"],
+            false
         );
     }
 

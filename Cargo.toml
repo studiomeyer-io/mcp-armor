@@ -1,10 +1,10 @@
 [package]
 name = "mcp-armor"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
+description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, detects tools/list schema drift to close the rug-pull / silent-redefinition class (Layer 7, NFKC-canonical fingerprint with off/warn/block modes), exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"
 homepage = "https://github.com/studiomeyer-io/mcp-armor"
 authors = ["Matthias Meyer (StudioMeyer) <hi@studiomeyer.io>"]
@@ -28,9 +28,19 @@ thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-opentelemetry = { version = "0.27", default-features = false, features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
+# v0.4 OTLP stack upgrade 0.27 → 0.30 — closes the BatchSpanProcessor
+# shutdown-hang class that bit the 0.27 release (see
+# open-telemetry/opentelemetry-rust#2071 + #2798). The 0.28 line dropped
+# the explicit `runtime::Tokio` parameter and rewrote
+# BatchSpanProcessor/PeriodicReader to run on a dedicated background
+# thread instead of relying on a tokio runtime — that change alone fixes
+# the historical shutdown deadlock without behavioural surprises in
+# fmt-only default builds. We hold at 0.30 rather than chase 0.32 because
+# 0.31 reworked the metrics SDK in ways we don't consume and 0.32 changed
+# the OTLP feature-flag layout again; 0.30 is the LTS-shaped step.
+opentelemetry = { version = "0.30", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.30", default-features = false, features = ["trace", "experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.30", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
 ed25519-dalek = { version = "2.1", features = ["pem", "rand_core"] }
 regex = "1.10"
 aho-corasick = "1.1"
@@ -41,6 +51,21 @@ base64 = "0.22"
 toml = "0.8"
 semver = "1"
 tempfile = "3.10"
+# v0.4 — replace hand-rolled SHA-256 (~135 LOC, NIST-vector-validated but
+# unaudited) with the RustCrypto `sha2` crate. The audit-trail path
+# (Rekor artifact hashing) shouldn't sit on hand-rolled cryptography
+# when a battle-tested, formally-audited alternative is one dep away.
+# `sha2 = "0.11"` brings in `digest = "0.11"` and `cpufeatures` — both
+# RustCrypto, both already widely depended on. `hex` is the canonical
+# hex encoder companion (3.5KB SLoC, zero deps).
+sha2 = "0.11"
+hex = "0.4"
+# v0.4 — file locking for concurrent CLI `keystore pin` race (Critic M1
+# from v0.3 review). `fs2` is the standard advisory `flock(2)` wrapper
+# (62 M downloads, stable since 2018, zero deps beyond libc). Used in
+# `manifest::tofu::Keystore::persist_locked` to make load → mutate →
+# persist a single critical section across processes on the same host.
+fs2 = "0.4"
 # v0.2 Round-1-review observation (Analyst #2): `rusqlite` was declared as
 # an optional dep for an `audit-db` feature that was *never* wired into
 # any code path. Removing it: shipping a feature flag that does nothing is

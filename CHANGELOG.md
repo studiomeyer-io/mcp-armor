@@ -4,6 +4,328 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.5.0 ready, awaiting tag
+
+This entry captures the **v0.5.0 work** built on top of the
+code-complete-but-untagged v0.4.0 (Session 1187, 2026-05-25). The
+v0.5 wave is a **defense-extension pass**: it adds **Layer 7
+(Tools-List Schema Drift Detection)** to close the Rug-Pull /
+Silent Redefinition threat class that the v0.1-v0.4 layers do not
+cover. The v0.4 correctness changes from Session 1187 stay in
+this release unchanged — v0.5 ships v0.4 + Layer 7 in a single
+tag (Session 1232, 2026-05-28).
+
+### Headline
+
+The TOFU keystore in `manifest::tofu` only fires when the upstream
+serves an Ed25519-signed manifest — empirically less than 5% of
+real-world MCP servers do. v0.5 fills the gap for the 95% case:
+persist a per-program **BLAKE3 fingerprint** of the first-seen
+`tools/list` response, then on every subsequent `tools/list`
+compare against the baseline and surface drift to the operator
+(`warn` mode, default) or refuse the response (`block` mode).
+
+The threat model is the Invariant Labs **MCP Security Notification
+on Tool Poisoning Attacks** + the CyberArk **Full-Schema Poisoning**
+research + the OWASP MCP Tool Poisoning catalog entry. Layer 7
+matches the **IETF `draft-sharif-mcps-secure-mcp-00`** "Pin Store"
+shape and the **MIS Sealed Manifest L0 (TOFU baseline)** level as
+runnable code.
+
+### Layer 7 — Tools-List Schema Drift Detection (NEW)
+
+- New module `manifest::drift` (~1100 LOC + 29 unit tests).
+- New control-plane MCP tool `armor_get_drift_history` (10th tool;
+  read-only inspection of the persisted baselines).
+- New CLI subcommand `mcp-armor drift {list|show|clear|trust|prune|path}`
+  with the operator workflows for accepting / rejecting / pruning
+  baselines.
+- New policy field `tools_list_drift_detection: "off" | "warn" |
+  "block"` (default `warn` — fail-open on bootstrap so existing
+  wrap setups don't suddenly reject legitimate first-sight responses).
+- New env / CLI override `MCP_ARMOR_DRIFT_HISTORY` /
+  `--drift-history` for the on-disk path
+  (`$XDG_DATA_HOME/mcp-armor/tools-history.toml` default).
+- BLAKE3 fingerprint pipeline is stable under tool re-ordering by
+  the upstream (sorts by canonicalised tool name before hashing)
+  and **stores only hashes, never description text in plaintext**.
+- Drift block uses JSON-RPC error code `-32001` (policy violation
+  in the implementation-defined range — not `-32603` internal
+  error, which would cause MCP clients to infinite-retry).
+
+### Two-round agent-code-review (R1 + R2)
+
+- **R1 verdict: AMBER (Critic), A- (Analyst), Research +5
+  industry-state findings.** 7 R1-actionable findings landed
+  in-place with 20 regression tests:
+    1. NFKC + whitespace-trim + invisible-char strip on
+       tool-name and parameter-name (closes Lyrie MCP-1.4 /
+       CVE-2026-29774 zero-width-suffix class).
+    2. `History::persist_locked_merge` — re-load under flock +
+       merge concurrent additions (closes the TOCTOU race that
+       `persist_locked` alone has).
+    3. JSON-RPC error code `-32603` → `-32001` for drift blocks.
+    4. `required_set_hash` widened 64-bit → 128-bit (birthday
+       bound 2^32 → 2^64).
+    5. `tool_get_policy` surfaces `scan_confusable`,
+       `deny_env_keys`, `tools_list_drift_detection`,
+       `allow_patterns_per_tool`.
+    6. `notifications/tools/list_changed` recognised + logged
+       (no auto-reset — that would defeat the rug-pull defense).
+    7. CVE feed refresh: +4 fresh entries (rmcp CVE-2026-42559,
+       n8n-mcp CVE-2026-42282, Excel-MCP CVE-2026-40576, Lyrie
+       CVE-2026-29774). Total: 14 CVEs (was 10).
+- **R2 verdict: GO (Critic 0.91), A- (Analyst stable).** Two R2
+  polish items folded in:
+    - CVE feed file renamed `ox-advisory-2026-04-15.toml` →
+      `curated-2026-05-28.toml`; `armor_check_cve` now lists six
+      provenance sources in `advisories_consulted`.
+    - 5 edge-case tests for `canonicalize_identifier` (empty
+      string, pure-invisible input, whitespace-only,
+      parameter-name dedupe after canonicalisation).
+- 247 tests default / 246 tests all-features pass (was 173 / 172
+  on v0.4 — total +74 tests, +43%). `cargo clippy --all-targets
+  --all-features -- -D warnings` clean. `cargo fmt --check` clean.
+  `cargo deny --all-features check` advisories + bans + licenses +
+  sources all green.
+
+### Backwards compatibility
+
+- New policy field `tools_list_drift_detection` defaults to `warn`
+  via `#[serde(default)]` — existing `policy.toml` files load
+  unchanged.
+- `mcp_armor::proxy::run_proxy` takes a new
+  `drift_history_path: Option<PathBuf>` parameter — **breaking
+  change for direct lib consumers** (the CLI bin is updated). The
+  hand-rolled JSON-RPC control plane gains one new tool
+  (`armor_get_drift_history`) — additive, no break.
+- On-disk `tools-history.toml` schema_version=1. Hard-refuses
+  load when the file declares a higher schema_version (no silent
+  entry-drop, defends against the downgrade-attack class).
+
+### v0.6 backlog (carried forward from R1/R2 reviews)
+
+- `format_rfc3339_utc` / `hex_short` / `now_iso` triplication
+  across `manifest::tofu`, `manifest::drift`, `control::history`
+  — pull into `src/util.rs` or `src/time.rs`.
+- `drift_block_response` JSON-RPC shape move from `stdio.rs` to
+  `pub(crate)` in `manifest::drift`.
+- `History::persist_locked` bare entry-point — deprecate in favour
+  of `persist_locked_merge` once all CLI callers migrate.
+- `notifications/prompts/list_changed` + `resources/list_changed`
+  handlers (symmetric to the tools variant).
+- Inbound-side drift gate (client → server) — currently outbound-only.
+- SHA-256 fingerprint backend behind `--hash blake3|sha256` for
+  PCI-DSS / HIPAA / FIPS-validated customers.
+- JCS (RFC 8785) canonicalisation for IETF MCPS + MIS signed
+  manifest interop.
+- `_meta.dev.studiomeyer/armor.fingerprint` injection on tools/call
+  responses — SEP-2659 cross-site audit-trail interop.
+- `rmcp 0.1.5` → `1.5.1+` migration (gets CVE-2026-42559
+  DNS-rebinding fix for free).
+
+---
+
+## [v0.4.0 — captured under v0.5.0 tag] — Session 1187, 2026-05-25
+
+### Headline
+
+v0.4 cashes in the v0.3 review backlog plus a Round-3 independent
+re-review. The release is a **correctness + hardening pass**, not a
+new-feature pass: every change either closes a documented backlog item
+or fixes a finding that the v0.3 two-round review missed. The crate
+stays at the same shape (single signed binary, scanner pipeline + TOFU
+keystore + Sigstore bridge + optional OTLP + control plane), but the
+internals are quieter, smaller, and lean on RustCrypto / OpenTelemetry
+0.30 / `fs2` rather than hand-rolled equivalents.
+
+### Pre-tag gates run locally
+
+- `cargo test --no-default-features` — **173 / 173 passed** (up from 164
+  in v0.3; +9 new regression tests in `tests/integration_v04_features.rs`
+  plus the `confusables_table_has_no_duplicate_from_codepoints`
+  invariant in `src/scanner/confusable.rs`).
+- `cargo test --all-features` — **172 / 172 passed** (the `--no-default`
+  delta is the one feature-gated test that `cfg(not(feature="..."))`
+  skips by design).
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo fmt --check` — clean.
+- `cargo deny --all-features check` — **advisories ok, bans ok,
+  licenses ok, sources ok**. Two `license-not-encountered` warnings
+  remain on `MPL-2.0` + `Unicode-DFS-2016` (deliberate forward-compat
+  allowance, documented in `deny.toml`).
+
+### Added
+
+- **`sha2 = "0.11"` for the Sigstore artifact-hash path.** The v0.3
+  hand-rolled SHA-256 reference impl (`mod sha256_impl`, ~135 LOC of
+  FIPS 180-4) is replaced by RustCrypto's audited, FIPS-validated
+  `sha2::Sha256`. The Rekor artifact-hashing call-site is the only
+  surface that touched SHA-256, but it lives on the audit-trail path,
+  and Round-3 review HIGH `H/02` flagged the "unaudited crypto on a
+  trust-sensitive code path" smell. `hex = "0.4"` is the companion
+  encoder. Hand-rolled module deleted; the NIST test vectors stay and
+  now exercise the upstream digest.
+- **`fs2 = "0.4"` advisory file lock around the TOFU keystore.** New
+  `Keystore::persist_locked()` entry point acquires `flock(LOCK_EX)`
+  on a sibling `.keys.toml.lock` file before delegating to the
+  unchanged `persist()` atomic-rename payload. Closes Critic M1 from
+  the v0.3 review: two concurrent `mcp-armor keystore pin` or `verify
+  --pin-on-first-use` invocations on the same host can no longer race
+  on the load → mutate → persist sequence and silently lose one
+  writer's changes. The bare `persist()` API stays available for
+  single-process callers. `main.rs` already routes the
+  `pin-on-first-use` path through the locked variant.
+- **Parent-directory `fsync(2)` after the atomic rename.** Research
+  item #2 in the v0.3 CHANGELOG backlog. `Keystore::persist` now
+  opens the parent dir and calls `sync_all()` after `tempfile::persist`
+  hands back from the rename, so a power loss between the rename and
+  the inode-table writeback cannot resurrect an empty destination on
+  ext4 / xfs / btrfs. Best-effort fallback on platforms where parent
+  fsync is a no-op; the file payload itself is durable regardless.
+- **`opentelemetry-otlp 0.30` + experimental async runtime BSP.** OTLP
+  stack moves from 0.27 → 0.30 (LTS-shaped, skips the metrics-SDK
+  churn of 0.31 / 0.32). The 0.28 release rewrote BatchSpanProcessor /
+  PeriodicReader to run on a dedicated background thread, which
+  **closes the shutdown-hang class** that bit the 0.27 line
+  (open-telemetry/opentelemetry-rust#2071 + #2798). We opted in to
+  `experimental_trace_batch_span_processor_with_async_runtime` so the
+  proxy hot-path keeps the previous async-flush semantics; the
+  shutdown deadlock is still gone because `provider.shutdown()` no
+  longer waits on a `tokio::main` runtime that is mid-teardown. SDK
+  symbol renames absorbed: `TracerProvider` → `SdkTracerProvider`,
+  `Resource::new(...)` → `Resource::builder()...build()`, exporter
+  `TraceError` → `OTelSdkError`. Tonic transport stays on
+  `grpc-tonic`. The `otlp` feature is still off by default.
+- **`InclusionOutcome::warning` field + `WARNING_SHAPE_ONLY` public
+  constant.** Round-3 review HIGH `H/03` — the previous
+  `structural_ok: true` field looked like "verified" to a JSON-
+  consuming client. v0.4 renames it to `shape_only_ok: bool` and
+  adds a mandatory `warning: String` that surfaces the limit verbatim
+  (`"shape-only check — SET was structurally verified as a 64-byte
+  Ed25519 signature but NOT cryptographically verified against
+  Rekor's public key. Do not treat as a Sigstore verdict."`). The
+  `tool_verify_bundle` MCP response reflects the warning string
+  unchanged so MCP clients receive the same wording the public Rust
+  constant emits.
+- **`PIN_OUTCOME_NEWLY_PINNED` + `PIN_OUTCOME_ALREADY_PINNED` public
+  constants in `manifest::ed25519`.** Round-3 review MED — the v0.3
+  code branched on the magic string literal `Some("newly_pinned")` in
+  `main.rs`. Producer (`verify_with_tofu` in `manifest::ed25519`) and
+  consumer (`main.rs`) now reference the same `&'static str`
+  constants. A future refactor that re-shapes `pin_outcome` into an
+  enum has to update one site, not search for stringly-typed branches.
+- **`confusables_table_has_no_duplicate_from_codepoints` invariant
+  test.** Curator safety net for the UTS-39 table in
+  `src/scanner/confusable.rs`. The `OnceLock`-backed `lookup()`
+  dedups silently; without this test a future edit that adds two
+  different ASCII mappings for the same Unicode codepoint would race
+  on which one wins after sort. The test promotes that failure mode
+  to a CI gate.
+
+### Changed
+
+- **`InclusionOutcome` field rename.** `structural_ok` → `shape_only_ok`
+  in `src/manifest/sigstore.rs` plus added `warning` field. JSON
+  consumers of `tool_verify_bundle` see the new shape. The old field
+  name is intentionally not aliased — the previous name was
+  misleading and v0.4 is the right boundary to fix it.
+- **`tool_get_policy.policy_path` rendered via `Path::display()`.**
+  Round-3 review MED — the v0.3 code used `format!("{:?}", ...)`
+  which produced Debug-quoted output (`"\"/home/user/.../policy.toml\""`)
+  in MCP responses. Now matches the `Path::display()` convention used
+  by `tool_get_keystore`.
+- **`Scanner::collect_cves` uses `binary_search_by` instead of
+  linear `find`.** Round-3 review MED — `pattern_to_cves` is sorted
+  at scanner construction time so the lookup is O(log n) by
+  invariant. Vec is small; the constant-factor win is marginal but
+  the asymptotic shape now matches the maintained order.
+- **Proxy stdio: `tokio::try_join!` → `tokio::join!` + explicit
+  child kill / wait.** Round-3 review HIGH `H/01` — the v0.3
+  short-circuit semantics of `try_join!` could return before
+  `child.wait()` on an inbound / outbound error, leaving a zombie
+  child process in the kernel for the lifetime of the parent. v0.4
+  always drives both directions to completion, then unconditionally
+  issues `child.kill().await` followed by `child.wait().await`. `kill`
+  is idempotent on `tokio::process::Child`; calling it on an already-
+  exited child is safe.
+- **`cargo-deny` advisories — `paste 1.0.15` ignored with rationale.**
+  The `paste` crate was archived upstream
+  (RUSTSEC-2024-0436). The transitive pull comes from `rmcp 0.1.5`
+  behind the `rmcp-control` feature. v0.5 migrates the control plane
+  to `rmcp 1.7.0` (official MCP Rust SDK) which drops the `paste`
+  dependency; until then the advisory is tracked but not build-
+  blocking via a dated `[advisories.ignore]` entry in `deny.toml`.
+
+### Removed
+
+- **`src/manifest/sigstore.rs::mod sha256_impl`** (~135 LOC) — the
+  hand-rolled SHA-256 routine. Replaced by `sha2::Sha256` (see
+  Added). The NIST FIPS 180-4 test vectors are kept and now run
+  against the upstream digest, guarding against future regressions.
+
+### Security
+
+- Removes one unaudited cryptographic implementation from the
+  trust-sensitive code path (Rekor artifact hashing). Net audit
+  surface delta: `+sha2 0.11` (RustCrypto, formally audited) + `+digest
+  0.11` + `+hex 0.4`; `~135 LOC` of hand-rolled crypto deleted.
+- Closes the OTLP exporter shutdown-hang class — a sidecar that
+  cannot shut down cleanly is one whose audit trail can drop tail
+  events on signal-triggered exit. Operators get a deterministic
+  flush even when the collector is unreachable.
+- Closes the `verify_inclusion` semantic-confusion class via the
+  `shape_only_ok` rename + mandatory `warning`. Clients reading the
+  `tool_verify_bundle` JSON response can no longer mistake a 64-byte
+  SET shape check for a cryptographic Rekor verdict.
+- Closes the TOFU keystore concurrent-pin race via `flock(LOCK_EX)` on
+  the keystore parent directory. Operators running mcp-armor in CI
+  parallelism no longer silently lose `pin` operations.
+
+### v0.5 backlog (carried forward)
+
+- **`rmcp 0.1.5` → `1.7.0`** — the official MCP Rust SDK shipped
+  stable on 2026-05-13 (12 days before this entry was written). The
+  v0.3 scaffold returns `Err(...)` from `ServerHandler::call_tool`,
+  which is what `run()` documents. Real migration unblocks the
+  `tool_router`-macro path and brings MCP protocolVersion `2025-11-25`
+  automatically. Drops the `paste 1.0.15` advisory.
+- **`sigstore-rekor 0.8.0` (released 2026-05-21)** — switch the
+  in-tree Rekor REST client to the upstream crate, which transitively
+  pulls in `sigstore-merkle` and unlocks **Rekor v2 tiles** support
+  (GA since Oct 2025, `log2025-1.rekor.sigstore.dev`). 10 direct
+  deps, no `sigstore-rs` audit-surface blow-up.
+- **Cryptographic SET verify against Rekor's pubkey.** Today's
+  shape-only check is honest about its limit (see the new `warning`
+  field). v0.5 walks the TUF-distributed Rekor pubkey rotation.
+- **`tracing-opentelemetry 0.33` bridge.** The mod-doc on
+  `src/otel/mod.rs` already calls this out as the natural next step.
+- **Fulcio cert chain verification** (`--certificate-identity`,
+  `--certificate-oidc-issuer`) — production-grade keyless verify.
+- **`mcp-armor wrap` proxy split** (Refactor 3 from the nex7
+  health sweep) — `proxy/stdio.rs` is 461 LOC of mixed I/O loop +
+  policy gate + env strip + spawn + block verdict. Splitting into
+  `proxy/rpc.rs` + `proxy/spawner.rs` + `proxy/scanner_gate.rs`
+  isolates the env-strip surface so the Zealynx-2026 fix is even
+  more obvious to a casual reader.
+- **`dispatch_tool` plugin registry** — the 9-tool match in
+  `src/control/mod.rs` is fine for now but the next batch of v0.5
+  tools should land via a `ToolRegistry: HashMap<&'static str, …>`
+  so the dispatcher stays under ~100 LOC.
+
+### Backwards compatibility
+
+The `tool_verify_bundle` JSON response field name changed
+(`structural_set_ok` → `shape_only_ok`) and adds the new `warning`
+key. Clients that branched on the old field by string name will
+need an update. The semantic change is intentional: the old name
+implied "verified", which it never was. v0.4 is the right boundary
+to fix that.
+
+The `Scanner::scan_with()` 2-param API stays `#[deprecated(since =
+"0.3.0")]` with no removal scheduled yet. Migrate to
+`Scanner::scan_with_opts()` when convenient.
+
 ## [0.3.0] — 2026-05-22
 
 v0.3 ships three new defensive layers

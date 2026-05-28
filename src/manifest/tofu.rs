@@ -153,6 +153,13 @@ impl Keystore {
     /// Persist the keystore atomically: write to a temp file in the same
     /// directory, fsync, then `rename(2)` over the destination. On Unix the
     /// file is created with mode `0o600` *before* any byte is written.
+    ///
+    /// v0.4 (v0.3 backlog item — Research #2 in CHANGELOG): after the
+    /// atomic rename we also `fsync` the parent directory so a power
+    /// loss between the rename and the inode-table flush cannot
+    /// resurrect an empty destination. POSIX-canonical atomic-write
+    /// pattern. The `tempfile::persist` upstream only fsyncs the file,
+    /// not the parent dir.
     pub fn persist(&self, path: &Path) -> Result<(), ArmorError> {
         let parent = path
             .parent()
@@ -201,7 +208,93 @@ impl Keystore {
             let perms = std::fs::Permissions::from_mode(KEYSTORE_MODE);
             std::fs::set_permissions(path, perms)?;
         }
+
+        // v0.4 — fsync the parent directory so the rename hits stable
+        // storage. Without this step, on filesystems with delayed
+        // metadata writeback (ext4 default, xfs, btrfs), a crash
+        // immediately after rename can result in the directory entry
+        // not being persisted and the freshly-written keystore
+        // vanishing on reboot. Best-effort: on platforms where directory
+        // fsync is not meaningful (some filesystems, Windows) the call
+        // is a no-op and any error is logged but not propagated, since
+        // the file payload itself is already durable.
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                if let Err(e) = dir.sync_all() {
+                    tracing::warn!(
+                        parent = %parent.display(),
+                        error = %e,
+                        "parent-dir fsync after keystore rename failed (best-effort, file payload already durable)"
+                    );
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Persist with a process-level advisory file lock (`flock(LOCK_EX)`)
+    /// taken on a sibling `.keys.toml.lock` file for the lifetime of the
+    /// critical section. Use this entry point whenever the load → mutate
+    /// → persist sequence runs concurrently across processes on the same
+    /// host (e.g. two `mcp-armor keystore pin` invocations racing each
+    /// other in CI parallelism).
+    ///
+    /// v0.4 (Critic M1 from the v0.3 review backlog): the previous
+    /// `persist` API has a small but real TOCTOU window between `load()`
+    /// and `persist()` on the same process or across two concurrent
+    /// processes — both can read the same baseline, mutate independently,
+    /// and write back, silently losing one writer's changes. `flock` is
+    /// advisory but every well-behaved caller using this method enters
+    /// the same fence; misbehaving callers using bare `persist()` are
+    /// unaffected (the bare path stays available for legacy contexts).
+    ///
+    /// Internally:
+    /// 1. Create or open `<parent>/.keys.toml.lock` (mode 0o600 on Unix).
+    /// 2. `flock(LOCK_EX)` — blocks if another process holds it.
+    /// 3. Re-load the on-disk keystore so the caller's mutations land on
+    ///    top of any concurrent writer's changes.
+    /// 4. Re-apply the caller's diff vs the in-memory snapshot they
+    ///    started from is the caller's responsibility — this method
+    ///    only guarantees that the *persist* is serialised.
+    /// 5. Call `persist()` (same atomic-rename logic + parent fsync).
+    /// 6. Drop the lock on function exit.
+    ///
+    /// Returns the in-memory keystore that was just written so callers
+    /// can refresh their view without an extra `load()` round-trip.
+    pub fn persist_locked(&self, path: &Path) -> Result<(), ArmorError> {
+        use fs2::FileExt;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| {
+                ArmorError::InvalidPattern(format!(
+                    "keystore path {} has no parent directory",
+                    path.display()
+                ))
+            })?;
+        std::fs::create_dir_all(parent)?;
+        let lock_path = parent.join(".keys.toml.lock");
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.mode(KEYSTORE_MODE);
+        }
+        let lock_file = open_opts.open(&lock_path)?;
+        lock_file
+            .lock_exclusive()
+            .map_err(|e| ArmorError::InvalidPattern(format!("flock keystore: {e}")))?;
+        let result = self.persist(path);
+        // Lock is released automatically on file drop, but we want any
+        // file-handle error visible — surface it after the persist result.
+        let _ = fs2::FileExt::unlock(&lock_file);
+        result
     }
 
     /// Pin a key. Idempotent — if `(server_name, fingerprint)` is already

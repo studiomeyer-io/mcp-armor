@@ -209,11 +209,25 @@ impl Scanner {
         }
     }
 
+    /// Collect every CVE id mapped to the pattern ids that triggered.
+    ///
+    /// v0.4 (Round-3 review MED fix) — `pattern_to_cves` is kept in
+    /// `sort_by(|a,b| a.0.cmp(&b.0))` order at construction (see the
+    /// `Scanner::new` builder above), so a `binary_search_by` is
+    /// O(log n) per lookup against a Vec of typically 12–20 patterns —
+    /// the v0.3 linear `find` was O(n) per pattern on a hot path that
+    /// runs for every blocked envelope. The Vec is small enough that
+    /// the constant-factor improvement is marginal in absolute terms,
+    /// but the change costs nothing and makes the asymptotic shape
+    /// match the maintained invariant.
     fn collect_cves(&self, patterns: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for p in patterns {
-            if let Some((_, cves)) = self.pattern_to_cves.iter().find(|(k, _)| k == p) {
-                for c in cves {
+            if let Ok(idx) = self
+                .pattern_to_cves
+                .binary_search_by(|(k, _)| k.as_str().cmp(p.as_str()))
+            {
+                for c in &self.pattern_to_cves[idx].1 {
                     if !out.contains(c) {
                         out.push(c.clone());
                     }

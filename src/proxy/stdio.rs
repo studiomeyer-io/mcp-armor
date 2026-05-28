@@ -7,9 +7,13 @@
 
 use crate::control::history::ScanHistory;
 use crate::error::ArmorError;
+use crate::manifest::drift::{
+    self, default_path as drift_default_path, DriftKind, DriftMode, History as DriftHistory,
+};
 use crate::policy::{snapshot, FailMode, Policy, PolicyHandle};
 use crate::scanner::{ScanResult, ScanVerdict, Scanner};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -29,6 +33,160 @@ fn block_response(id: Value, matched: &[String], cves: &[String]) -> Value {
             }
         }
     })
+}
+
+/// v0.5 R1 Critic-MED fix — drift block uses JSON-RPC code `-32001`
+/// (implementation-defined server error, "policy violation") instead of
+/// `-32603` ("internal error"). `-32603` causes MCP clients (Claude
+/// Desktop, Cursor) to treat the failure as transient and retry the
+/// `tools/list` indefinitely — every retry triggers another drift check
+/// and the loop continues until the operator clears the baseline. The
+/// custom code in the reserved implementation-defined range
+/// (`-32099`..=`-32000`) tells smart clients "this is a deliberate
+/// refusal, do not auto-retry; surface to the operator."
+const ERR_DRIFT_POLICY_VIOLATION: i64 = -32001;
+
+/// v0.5 Layer 7 — block-response for a tools/list whose schema drifted
+/// from the stored baseline. Replaces the outbound response on its way
+/// back to the client so the LLM never sees the mutated schema.
+fn drift_block_response(id: Value, program: &str, detail: &drift::DriftDetail) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": ERR_DRIFT_POLICY_VIOLATION,
+            "message": "tools/list drift detected by mcp-armor — policy violation",
+            "data": {
+                "program": program,
+                "drift": detail,
+                "remediation": "review the diff, then run `mcp-armor drift trust <program> <manifest.json>` to accept the new shape or `mcp-armor drift clear <program>` to delete the baseline"
+            }
+        }
+    })
+}
+
+/// v0.5 Layer 7 — run the schema-drift detection sweep on a single
+/// outbound envelope. Side-effects (history mutation + persist) happen
+/// inside; the return value tells the caller whether the original line
+/// should pass through (`None`) or be replaced with a JSON-RPC error
+/// (`Some(replacement)`).
+///
+/// Performs `load → observe → persist_locked` per tools/list response —
+/// drift detection runs on first-sight + every tools/list refresh,
+/// never on tools/call traffic. Persist is atomic + flock-serialised so
+/// two concurrent `wrap` processes booting against the same upstream
+/// cannot race on the first-sight baseline.
+///
+/// Errors during load/persist are logged at `error` and the envelope
+/// passes through — drift detection must never *block* a legitimate
+/// response just because the history file is unreadable.
+pub(crate) fn run_drift_check(
+    program: &str,
+    envelope: &Value,
+    mode: DriftMode,
+    history_path: &std::path::Path,
+) -> Option<Value> {
+    if mode == DriftMode::Off {
+        return None;
+    }
+
+    // v0.5 R1 Research-P0 — surface `notifications/tools/list_changed`
+    // at info-level so the operator can correlate "server announced a
+    // refresh" with the subsequent drift signal that the next
+    // tools/list response will emit. We intentionally do NOT auto-reset
+    // the baseline here — a rug-pull attacker would just emit
+    // list_changed and swap the schema invisibly. The notification is
+    // surfaced, the next real tools/list response goes through the
+    // normal drift check, and the operator gets the audit trail.
+    if drift::looks_like_list_changed_notification(envelope) {
+        tracing::info!(
+            program = program,
+            "drift: server emitted notifications/tools/list_changed — next tools/list will be drift-checked against the existing baseline (not auto-reset)"
+        );
+        return None;
+    }
+
+    if !drift::looks_like_tools_list_response(envelope) {
+        return None;
+    }
+
+    let mut history = match DriftHistory::load(history_path) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                path = %history_path.display(),
+                "drift: load history failed — passing tools/list through"
+            );
+            return None;
+        }
+    };
+
+    let now = drift::now_iso();
+    let outcome = match history.observe(program, envelope, &now) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                program = program,
+                "drift: observe failed (malformed tools/list?) — passing through"
+            );
+            return None;
+        }
+    };
+
+    let mutated = match &outcome {
+        DriftKind::Unknown | DriftKind::Match => true,
+        DriftKind::Drift(_) => false,
+    };
+    if mutated {
+        // v0.5 R1 Critic-HIGH + Analyst-W3 fix: persist_locked_merge
+        // re-loads under the flock and merges concurrent additions
+        // before writing. Closes the multi-process lost-update race
+        // that single-process persist_locked has (two `mcp-armor wrap`
+        // instances against the same history file would otherwise
+        // overwrite each other's first-sight entries).
+        if let Err(e) = history.persist_locked_merge(history_path) {
+            tracing::error!(
+                error = %e,
+                path = %history_path.display(),
+                "drift: persist history failed — outcome not durable"
+            );
+        }
+    }
+
+    match outcome {
+        DriftKind::Unknown => {
+            tracing::info!(
+                program = program,
+                tools_count = history.find(program).map_or(0, |p| p.tools_count),
+                history_path = %history_path.display(),
+                "drift: first-sight baseline written for {}; clear via `mcp-armor drift clear {}` to re-baseline",
+                program,
+                program,
+            );
+            None
+        }
+        DriftKind::Match => None,
+        DriftKind::Drift(detail) => {
+            tracing::warn!(
+                program = program,
+                added = ?detail.added,
+                removed = ?detail.removed,
+                description_changed = ?detail.description_changed,
+                params_changed = detail.params_changed.len(),
+                mode = ?mode,
+                "drift: tools/list shape changed since baseline {}",
+                detail.baseline_iso
+            );
+            if mode == DriftMode::Block {
+                let id = envelope.get("id").cloned().unwrap_or(Value::Null);
+                Some(drift_block_response(id, program, &detail))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Decide whether `policy.allow_servers` says we should bypass the scanner
@@ -62,13 +220,22 @@ fn server_is_allowlisted(program: &str, allow_servers: &[String]) -> bool {
 /// never holds the read-lock across an `.await`.
 ///
 /// Returns once the upstream process exits or stdin EOFs.
+///
+/// v0.5 Layer 7 — `drift_history_path` (`Option<PathBuf>`) overrides
+/// the default `~/.local/share/mcp-armor/tools-history.toml` path used
+/// by the schema-drift detector. Passing `None` falls back to
+/// [`drift::default_path`]. The detector is gated on
+/// `policy.tools_list_drift_detection`; when that field is `off` the
+/// path is ignored.
 pub async fn run_proxy(
     program: &str,
     args: &[String],
     scanner: Arc<Scanner>,
     policy: PolicyHandle,
     history: Arc<ScanHistory>,
+    drift_history_path: Option<PathBuf>,
 ) -> Result<(), ArmorError> {
+    let drift_history_path = drift_history_path.unwrap_or_else(drift_default_path);
     // v0.3 Feature A — strip loader-class env keys from the child
     // process before spawn. Closes the Zealynx 2026 side-channel where a
     // registry-fetched MCP manifest can specify
@@ -244,6 +411,7 @@ pub async fn run_proxy(
     let scanner_out = scanner.clone();
     let policy_out = policy.clone();
     let history_out = history.clone();
+    let drift_history_path_out = drift_history_path.clone();
     let outbound = tokio::spawn(async move {
         let mut reader = BufReader::new(child_stdout).lines();
         let mut stdout = tokio::io::stdout();
@@ -254,6 +422,11 @@ pub async fn run_proxy(
                 Err(e) => return Err::<(), ArmorError>(ArmorError::Io(e)),
             };
             let trimmed = line.trim();
+            // v0.5 Layer 7 — drift-check replacement payload. When set,
+            // we emit this replacement INSTEAD of the original line so
+            // the client never sees a mutated tools/list shape under
+            // policy.tools_list_drift_detection = "block".
+            let mut drift_replacement: Option<Value> = None;
             if !trimmed.is_empty() {
                 let pol: Policy = snapshot(&policy_out);
                 // Round 1 M4 fix: outbound also re-evaluates allow_servers
@@ -291,30 +464,71 @@ pub async fn run_proxy(
                         );
                     }
                 }
+
+                // v0.5 Layer 7 — Tools-list schema-drift detection.
+                // Runs only when the envelope looks like a tools/list
+                // response (cheap structural pre-gate) and mode != Off.
+                // Decoupled from the scanner above so allowlisted
+                // servers still get drift coverage — rug-pulls don't
+                // care about `allow_servers`.
+                if pol.tools_list_drift_detection != DriftMode::Off {
+                    if let Ok(envelope) = serde_json::from_str::<Value>(trimmed) {
+                        drift_replacement = run_drift_check(
+                            &program_for_out,
+                            &envelope,
+                            pol.tools_list_drift_detection,
+                            &drift_history_path_out,
+                        );
+                    }
+                }
             }
-            let mut out = line;
-            out.push('\n');
-            stdout.write_all(out.as_bytes()).await?;
+            let payload = match drift_replacement {
+                Some(replacement) => {
+                    let mut s = serde_json::to_string(&replacement)?;
+                    s.push('\n');
+                    s
+                }
+                None => {
+                    let mut s = line;
+                    s.push('\n');
+                    s
+                }
+            };
+            stdout.write_all(payload.as_bytes()).await?;
             stdout.flush().await?;
         }
         Ok(())
     });
 
-    // Wait for either direction to finish.
-    let _ = tokio::try_join!(
-        async {
-            inbound
-                .await
-                .map_err(|e| ArmorError::InvalidPattern(e.to_string()))?
-        },
-        async {
-            outbound
-                .await
-                .map_err(|e| ArmorError::InvalidPattern(e.to_string()))?
-        }
-    )?;
+    // v0.4 Round-3 review HIGH fix — zombie-child elimination.
+    //
+    // The v0.3 path used `tokio::try_join!(...)?` which short-circuits the
+    // *first* error and drops the surviving direction. When `try_join` then
+    // bailed out via `?` the function returned before `child.wait()` ran,
+    // leaving the upstream process in a kernel ZOMBIE state for the
+    // lifetime of mcp-armor. Long-running orchestrators (Claude Desktop,
+    // Cursor) that re-wrap servers across reload cycles would accumulate
+    // those zombies.
+    //
+    // v0.4 fix: drive both directions to completion via `tokio::join!`
+    // (which never short-circuits), then ALWAYS issue `child.kill().await`
+    // followed by `child.wait().await` so the child is reaped regardless
+    // of which direction errored. `kill` on `tokio::process::Child` is
+    // idempotent — calling it on a process that has already exited
+    // returns `Ok(())`. Only after the child is reaped do we surface any
+    // direction's error back to the caller.
+    let (inbound_res, outbound_res) = tokio::join!(inbound, outbound);
 
-    let _ = child.wait().await?;
+    // Always reap the child — never leak a zombie even on inbound/outbound error.
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    let inbound_res = inbound_res
+        .map_err(|e| ArmorError::InvalidPattern(format!("inbound task join error: {e}")))?;
+    let outbound_res = outbound_res
+        .map_err(|e| ArmorError::InvalidPattern(format!("outbound task join error: {e}")))?;
+    inbound_res?;
+    outbound_res?;
     Ok(())
 }
 

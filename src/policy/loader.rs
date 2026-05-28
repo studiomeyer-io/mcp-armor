@@ -1,4 +1,5 @@
 use crate::error::ArmorError;
+use crate::manifest::drift::DriftMode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,24 @@ pub struct Policy {
     /// Cyrillic i/o vs. ASCII `ignore`). Default: `true`.
     #[serde(default = "default_scan_confusable")]
     pub scan_confusable: bool,
+    /// v0.5 Layer 7 — Tools-list schema-drift detection mode.
+    /// Closes the Rug-Pull / Silent Redefinition threat class
+    /// (Invariant Labs, CyberArk Full-Schema Poisoning, OWASP MCP
+    /// Tool Poisoning). Three modes:
+    ///
+    /// - `off`: Layer 7 bypassed entirely (no fingerprint, no log).
+    /// - `warn`: default. Drift logs at `tracing::warn!`, tools/list
+    ///   response passes through unchanged.
+    /// - `block`: drift causes the proxy to replace the tools/list
+    ///   response with a JSON-RPC error (code -32603, message
+    ///   `tools/list drift detected by mcp-armor`). Operator clears
+    ///   via `mcp-armor drift clear <program>` or
+    ///   `mcp-armor drift trust <program>`.
+    ///
+    /// First-sight (no baseline yet) is *always* silently baselined
+    /// regardless of mode — Layer 7 is fail-open on bootstrap.
+    #[serde(default)]
+    pub tools_list_drift_detection: DriftMode,
     pub version: String,
 }
 
@@ -106,6 +125,7 @@ impl Default for Policy {
             allow_patterns_per_tool: BTreeMap::new(),
             deny_env_keys: default_deny_env_keys(),
             scan_confusable: true,
+            tools_list_drift_detection: DriftMode::default(),
             version: "default".to_string(),
         }
     }
