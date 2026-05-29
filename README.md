@@ -126,7 +126,7 @@ mcp-armor mcp-control
 
 ## Control-plane tools
 
-The `mcp-armor mcp-control` server exposes **9 read-only tools** in v0.2 (6 from v0.1 + 3 new). All have `readOnlyHint: true` and `destructiveHint: false`.
+The `mcp-armor mcp-control` server exposes **10 read-only tools** (6 from v0.1 + 3 from v0.2 + 1 added in v0.5). All have `readOnlyHint: true` and `destructiveHint: false`. The control plane speaks MCP spec **`2025-11-25`** since v0.7 (was `2025-06-18` v0.1 through v0.6).
 
 | Tool | Description |
 |---|---|
@@ -139,6 +139,9 @@ The `mcp-armor mcp-control` server exposes **9 read-only tools** in v0.2 (6 from
 | `armor_get_keystore` | **v0.2** — List pinned TOFU maintainer public keys (server_name + fingerprint + pinned_at_iso) |
 | `armor_verify_bundle` | **v0.2** — Parse a cosign sigstore.json bundle and structurally verify the Rekor SET shape. Offline |
 | `armor_rekor_lookup` | **v0.2** — Query the Sigstore Rekor transparency log for inclusion of a manifest's artifact hash. Requires `--features sigstore-bridge` |
+| `armor_get_drift_history` | **v0.5** — Inspect the tools-list schema-drift baselines (Layer 7). Read-only, optional `program` filter, no caller-supplied path |
+
+The control plane runs by default as a hand-rolled JSON-RPC stdio server (no extra crate deps). Operators who want the official Anthropic MCP Rust SDK on the wire can compile in the parallel rmcp 1.5 control plane via `--features rmcp-control` (v0.7 finally wires this; v0.2 through v0.6 shipped it as a stub that advertised tools but refused calls). Both planes share one dispatcher — same 10 tools, same semantics, same `protocolVersion`.
 
 ## Scanner pipeline
 
@@ -290,7 +293,7 @@ with concrete crate targets (see CHANGELOG).
 | **`verify_inclusion.shape_only_ok` rename + mandatory `warning` field** | **shipped in v0.4** |
 | Sigstore Rekor REST lookup-by-hash | shipped in v0.2 behind `--features sigstore-bridge` |
 | **OTLP gRPC export on `opentelemetry-otlp 0.30`** | **shipped in v0.4** (closes the v0.27 shutdown-hang class) |
-| rmcp control-plane (minimal `ServerHandler`) | scaffold-only since v0.2 behind `--features rmcp-control`, real migration is v0.5 |
+| **rmcp 0.1.5 → 1.5 migration (closes CVE-2026-42559 transitively, MCP protocolVersion `2025-11-25`)** | **shipped in v0.7** (fully-wired `ServerHandler` impl behind `--features rmcp-control`, both control planes share one dispatcher) |
 | Per-tool pattern allowlist | shipped in v0.2 |
 | SIGHUP policy reload (Unix) | shipped in v0.2 |
 | `armor_check_cve` semver-range matching | shipped in v0.2 |
@@ -301,7 +304,7 @@ with concrete crate targets (see CHANGELOG).
 | **Parent-dir `fsync` after keystore atomic rename** | **shipped in v0.4** |
 | **`PIN_OUTCOME_*` public constants instead of magic strings** | **shipped in v0.4** |
 | **Proxy `tokio::join!` + explicit child kill/wait (zombie-child fix)** | **shipped in v0.4** |
-| rmcp `#[tool_router]` macro path (`rmcp 1.7.0` upstream-stable) | v0.5 backlog |
+| rmcp `#[tool_router]` macro path (single derive site for schemas) | v0.8 backlog — manual impl is intentional today (one schema SSOT across both planes) |
 | Rekor v2 tiles-based verifier via `sigstore-rekor 0.8` | v0.5 backlog |
 | Cryptographic SET verify against Rekor pubkey (TUF) | v0.5 backlog |
 | Fulcio cert-chain verification | v0.5 backlog |

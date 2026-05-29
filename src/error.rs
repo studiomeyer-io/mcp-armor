@@ -43,6 +43,17 @@ pub enum ArmorError {
 
     #[error("ed25519 error: {0}")]
     Ed25519(String),
+
+    /// v0.7 — transport / serve-loop failure surfaced from the rmcp 1.5
+    /// control plane. Carries the underlying rmcp error message stringly
+    /// so we don't pin a `rmcp::ErrorData` field into the public error
+    /// type (the rmcp dep is `optional = true` behind `rmcp-control`,
+    /// and we keep the default error variant set rmcp-feature-agnostic).
+    /// Replaces v0.6's overload of `InvalidPattern(...)` for the
+    /// `service.waiting()` + `handler.serve()` failure paths in
+    /// [`crate::rmcp_server::run`].
+    #[error("rmcp: {0}")]
+    Rmcp(String),
 }
 
 impl From<ed25519_dalek::SignatureError> for ArmorError {

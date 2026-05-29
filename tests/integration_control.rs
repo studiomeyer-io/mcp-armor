@@ -15,11 +15,15 @@ fn ctx() -> (Scanner, Policy, ScanHistory) {
 }
 
 #[test]
-fn initialize_returns_protocol_2025_06_18() {
+fn initialize_returns_protocol_2025_11_25() {
+    // v0.7 — protocolVersion bumped from `2025-06-18` (v0.1 through v0.6)
+    // to `2025-11-25` to match the current MCP spec line. Clients that
+    // pin the older string must update; clients that feature-detect on
+    // tools/list shape are unaffected.
     let (s, p, h) = ctx();
     let req = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
     let resp = handle_request(&req, &s, &p, &h);
-    assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(resp["result"]["protocolVersion"], "2025-11-25");
 }
 
 #[test]

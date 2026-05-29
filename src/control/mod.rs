@@ -1,11 +1,18 @@
-//! Control-plane MCP server. Read-only inspection surface — 6 tools that
-//! let a client app inspect policy + scan history without touching the file
-//! system.
+//! Control-plane MCP server. Read-only inspection surface — 10 tools
+//! (v0.5 final) that let a client app inspect policy + scan history +
+//! TOFU keystore + Sigstore bundles + tools/list drift baselines
+//! without touching the host file system.
 //!
 //! Implementation note: this is a hand-rolled line-delimited JSON-RPC 2.0
-//! stdio server (MCP spec 2025-06-18). PLAN.md R5 favours `rmcp` v1.6 — that
-//! migration is on the v0.2 backlog (BUILDER_NOTES.md). The hand-rolled
-//! server keeps v0.1 free of an extra crate dep until rmcp is bench-verified.
+//! stdio server. v0.7 bumps `protocolVersion` from `2025-06-18` to
+//! `2025-11-25` (the spec line that ratifies SEP-1319 task lifecycle,
+//! structured-output `_meta` namespace, and tightens the `protocolVersion`
+//! negotiation rules MCP clients use to detect server capability sets).
+//! We continue to ship the hand-rolled JSON-RPC server as the DEFAULT
+//! control plane because it is bench-verified (<5ms p99), audit-minimal
+//! (one source file, zero extra deps), and identical in semantics to the
+//! rmcp 1.5 control plane that v0.7 also wires up behind
+//! `--features rmcp-control` (see `crate::rmcp_server`).
 
 pub mod history;
 pub mod tools;
@@ -25,7 +32,18 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+/// MCP spec version reported to clients on `initialize`. v0.7 bumps
+/// from the v0.6 line (`2025-06-18`) to the current spec line. Clients
+/// that don't recognise `2025-11-25` still see a well-formed `initialize`
+/// response with a `protocolVersion` string and will fall back to feature
+/// detection on `tools/list` shape — same as every prior bump.
+///
+/// `pub(crate)` v0.7 R2 Critic Finding 3 — the rmcp control-plane test
+/// `handler_protocol_version_matches_hand_rolled_plane` compares the
+/// rmcp `ProtocolVersion::default()` serialised string against this
+/// constant to enforce cross-plane parity. The constant is only visible
+/// inside the crate; no public API surface change.
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "mcp-armor-control";
 
 /// Run the control-plane stdio server. Reads JSON-RPC from stdin, writes

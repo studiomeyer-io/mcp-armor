@@ -4,6 +4,261 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-05-29
+
+This release closes the **rmcp 0.1.5 → 1.5 migration** that the v0.5
+and v0.6 backlogs deferred to a dedicated tag, and finally **wires the
+rmcp control plane that has been a stub since v0.2**. v0.7 is small
+in line count but large in trust posture: the optional `rmcp` dep
+moves from a pre-stable 0.1.x line that no longer receives security
+updates to the official Anthropic MCP Rust SDK at 1.5+ (Cargo.lock
+today resolves to **rmcp 1.7.0**).
+
+### Why now: CVE-2026-42559 transitive closure
+
+`rmcp 1.4.0` (released 2026-04-09 as PR #764) added Host-header
+validation to the Streamable HTTP server transport, closing
+**[CVE-2026-42559](https://nvd.nist.gov/vuln/detail/CVE-2026-42559)**
+(CVSS 8.8 HIGH, public on the NVD since 2026-05-14,
+[GHSA-89vp-x53w-74fx](https://github.com/advisories/GHSA-89vp-x53w-74fx),
+RUSTSEC-2026-0140). The bug let a malicious public website use DNS
+rebinding to send authenticated requests to a victim's loopback or
+private-network MCP server — the same class GoogleProjectZero
+demonstrated against the Go MCP SDK (CVE-2026-34742) and the Python
+SDK (<1.23.0).
+
+mcp-armor uses **stdio only** (`rmcp::transport::stdio()`); the
+Streamable HTTP transport is not wired, so the CVE is not exploitable
+in any v0.x mcp-armor binary regardless of the dep version. But
+downstream operators running `cargo audit` or `cargo deny check` after
+`cargo install mcp-armor` would see CVE-2026-42559 flagged as a
+transitive advisory against `rmcp < 1.4.0` once the rustsec
+advisory-db catches up. v0.7 closes that yellow line.
+
+### What actually changed
+
+- **`Cargo.toml`** — version 0.7.0; `rmcp` dep moves from
+  `version = "0.1", default-features = false, features = ["server",
+  "transport-io", "macros", "base64"]` to
+  `version = "1.5", default-features = false, features = ["server",
+  "transport-io"]`. The `macros` feature is intentionally dropped: our
+  manual `impl ServerHandler` in `src/rmcp_server.rs` doesn't use any
+  `#[tool]` / `#[tool_router]` / `#[tool_handler]` macros, so removing
+  the feature eliminates the `rmcp-macros` proc-macro crate + its
+  `darling` / `serde_derive_internals` dep chain from the audit
+  surface. (Per v0.7 R2 verification, `schemars` itself remains a
+  non-optional dep of `rmcp 1.7.0`'s core crate — the rmcp model
+  types bound `Tool::input_schema` etc. on `JsonSchema` regardless
+  of feature flags.) The `version = "1.5"` is a Cargo floor, not a
+  pin — Cargo resolves to the latest semver-compatible release
+  (1.7.0 today). A 1.8+ release that breaks our `ServerHandler` /
+  `RequestContext<RoleServer>` / `CallToolRequestParams` /
+  `MaybeSendFuture` surface would fail to compile and force a
+  deliberate floor bump.
+- **`src/control/mod.rs`** — `MCP_PROTOCOL_VERSION` constant bumps
+  from `"2025-06-18"` to **`"2025-11-25"`** (the current MCP spec
+  line, ratifies SEP-1319 task lifecycle + structured-output `_meta`
+  namespace + tighter protocolVersion negotiation rules). Visibility
+  bumps from private to `pub(crate)` so the rmcp control-plane test
+  in `src/rmcp_server.rs` can compare it against rmcp's
+  `ProtocolVersion::default()` for cross-plane parity (v0.7 R2 Critic
+  Finding 3). The integration test renames from
+  `initialize_returns_protocol_2025_06_18` to
+  `initialize_returns_protocol_2025_11_25`.
+- **`src/rmcp_server.rs`** — full rewrite (~390 LOC, was ~140 LOC of
+  stub). The pre-v0.7 module advertised the 9 (then 10) tools via
+  `get_info()` but `run()` returned an `ArmorError` saying "tools/call
+  routing is not yet wired in v0.2." v0.7 wires every surface:
+  - `ArmorRmcpHandler { state: ArmorState }` is the public handler.
+    Derives `Clone` so rmcp can move it into per-request futures.
+  - `get_info()` returns a fully-populated `ServerInfo` via
+    `ServerInfo::default()` + field mutation
+    (the rmcp 1.5 `ServerInfo` / `InitializeResult` /
+    `Implementation` structs are `#[non_exhaustive]`, so we go
+    through `Implementation::new(name, version)` + field assignment
+    rather than struct-literal syntax that E0639 blocks in external
+    crates). Reports `server_info.name = "mcp-armor-control"` and
+    `version = crate::VERSION`, matching the hand-rolled plane.
+  - `initialize(...)` returns `Ok(self.get_info())` — version
+    negotiation is deferred to v0.8 (matches hand-rolled plane
+    behaviour for parity).
+  - `list_tools(...)` calls `build_tools()` which deserialises the
+    hand-rolled JSON schema from `crate::control::tools::list()` into
+    `Vec<rmcp::model::Tool>` via `serde_json::from_value`. This keeps
+    `control::tools::list` as the **single source of truth for tool
+    semantics** across both control planes — exactly the schema-drift
+    class the v0.5 Layer 7 detector is built to catch in upstream
+    servers. v0.7 R1 Critic finding M2 hardened the filter_map with
+    a `tracing::warn!` per dropped entry so partial-drift cases
+    surface in operator logs (the all-drops case is caught by the
+    `build_tools_returns_ten_entries` test).
+  - `call_tool(...)` routes through `dispatch_via_handle_request(...)`
+    which constructs a synthetic JSON-RPC envelope and calls
+    `crate::control::handle_request(...)` — the **same dispatcher
+    the hand-rolled plane uses**. Both planes thus share one
+    `dispatch_tool` branch table for the 10-tool surface; a fix in
+    the dispatcher lands in both surfaces without further wiring.
+    Success path wraps the structured JSON in
+    `CallToolResult::success(vec![Content::text(...)])` + post-mutates
+    `result.structured_content = Some(structured)` so MCP clients
+    that parse SEP-1319 structured outputs and clients that only
+    render text both see the payload. Error path returns
+    `CallToolResult::error(...)` for tool-level errors.
+  - `run(state)` calls `handler.serve(stdio()).await?` followed by
+    `service.waiting().await?`, using rmcp's official
+    `ServiceExt::serve` entry point. Transport + serve-loop failures
+    surface as the new `ArmorError::Rmcp(String)` variant (v0.7 R1
+    Critic finding M1/L2) rather than overloading `InvalidPattern`
+    which is documented as "scanner: invalid pattern config".
+  - Six new unit tests: `build_tools_returns_ten_entries`,
+    `build_tools_matches_hand_rolled_list_length` (SSOT round-trip
+    parity), `dispatch_via_handle_request_returns_policy`,
+    `dispatch_via_handle_request_unknown_tool_errors`,
+    `handler_get_info_reports_canonical_name`, and
+    `handler_protocol_version_matches_hand_rolled_plane` (v0.7 R1 H1
+    + R2 Finding 3 — asserts the rmcp `ProtocolVersion::default()`
+    serialised string equals `crate::control::MCP_PROTOCOL_VERSION`,
+    catching drift in either direction).
+- **`src/error.rs`** — new `ArmorError::Rmcp(String)` variant
+  (`#[error("rmcp: {0}")]`) for transport + serve-loop + tool-dispatch
+  failures from the rmcp control plane. Documented as the catch-all
+  for "the rmcp control plane could not complete this operation";
+  scanner-config errors stay distinct in `InvalidPattern`. No public
+  API break — additive variant.
+- **`deny.toml`** — removed the `RUSTSEC-2024-0436` (`paste` crate
+  upstream-archived) ignore. The `paste` transitive came in via
+  `rmcp 0.1.5`; rmcp 1.5+ dropped the dep. `cargo deny
+  --all-features check` confirms the advisory is "not encountered"
+  in the v0.7 tree.
+
+### Code review — R1 + R2 LOOP
+
+Per the [agent-code-review skill](https://github.com/studiomeyer-io/mcp-armor),
+v0.7 ran two rounds of parallel review (Critic + Analyst + Research in
+R1; Critic + Analyst in R2 with Research skip per the closing-round
+pattern).
+
+**R1** — Critic: CONDITIONAL GO (1 HIGH + 4 MED + 2 LOW). Analyst: A−.
+Research: GO+UPDATES. **All actionable findings landed in R1 fixes:**
+
+- **H1 (Critic):** `ProtocolVersion::default()` could silently drift
+  from `MCP_PROTOCOL_VERSION` between rmcp patch releases, and no test
+  asserted the wire-level string. Fix: new
+  `handler_protocol_version_matches_hand_rolled_plane` test.
+- **M1/L2 (Critic):** `ArmorError::InvalidPattern` semantically
+  overloaded for rmcp transport failures. Fix: new
+  `ArmorError::Rmcp(String)` variant + use in `run()`.
+- **M2 (Critic):** `build_tools` filter_map silently dropped failed
+  `serde_json::from_value::<Tool>` rounds. Fix: `tracing::warn!` per
+  dropped entry with `tool` + `error` fields.
+- **Analyst Concern-4:** `features = ["macros"]` removed.
+- **Analyst Concern-2:** Cargo.toml comment rewritten to honestly
+  document `version = "1.5"` as a Cargo floor (not a pin) and the
+  actual 1.7.0 resolution.
+
+**R2** — Critic: CONDITIONAL GO (2 MEDIUM). Analyst: B+. **Both R2
+fixes landed:**
+
+- **R2 Critic Finding 1 (echoed by Analyst W3):** the R1 Cargo.toml
+  comment claimed removing `features = ["macros"]` eliminates
+  `schemars` from the dep tree, but Cargo.lock shows `schemars` is an
+  unconditional dep of `rmcp 1.7.0`'s core crate. Comment rewritten
+  to honestly state the audit-surface reduction is the `rmcp-macros`
+  proc-macro crate + its derive deps, not `schemars` itself.
+- **R2 Critic Finding 2:** `dispatch_via_handle_request` still
+  returned `InvalidPattern` for tool-layer errors after the R1 fix
+  only updated `run()`. Fix: tool-dispatch errors now flow through
+  `ArmorError::Rmcp(format!("tool dispatch: {msg}"))` for consistent
+  variant typing across the entire rmcp control-plane path.
+- **R2 Critic Finding 3 (LOW):** the R1-added protocol-version test
+  asserted `pv_str == "2025-11-25"` (a hard-coded literal) instead
+  of `pv_str == crate::control::MCP_PROTOCOL_VERSION`. Fix: assertion
+  rewritten as cross-plane parity (test fails BOTH when rmcp drifts
+  away from our constant AND when our constant drifts away from
+  rmcp's default). Required bumping `MCP_PROTOCOL_VERSION`
+  visibility from `const` to `pub(crate) const`.
+
+**R3 self-check** (grep against the R2 finding patterns + Cargo.lock
+audit + `cargo deny --all-features check`): all 5 patterns clean.
+schemars-bleibt note honest, `ArmorError::Rmcp` used at all three sites
+(tool dispatch, serve init, serve loop), test asserts against const,
+no remaining `InvalidPattern` in rmcp paths.
+
+### Quality gates
+
+- **Tests:** **343/343 grün** all-features (was 337 in v0.6, +6 new
+  rmcp_server unit tests); 337/337 no-default-features (unchanged).
+- **`cargo clippy --all-features --all-targets -- -D warnings`** clean.
+- **`cargo clippy --no-default-features --all-targets -- -D warnings`** clean.
+- **`cargo fmt --check`** clean.
+- **`cargo deny --all-features check`** — advisories ok, bans ok,
+  licenses ok, sources ok.
+
+### Backwards compatibility
+
+- The hand-rolled JSON-RPC control plane remains the **default** —
+  every existing operator path (`mcp-armor mcp-control` subcommand,
+  `mcp-armor wrap` proxy) is unchanged.
+- The `rmcp-control` feature is off-by-default — operators who never
+  enabled it see only the protocolVersion bump
+  (`2025-06-18` → `2025-11-25`) and the optional dep-tree shift if
+  they explicitly enable the feature.
+- Operators who enabled `--features rmcp-control` in v0.2-v0.6 saw a
+  stub that refused every `tools/call`; v0.7 fully wires that path.
+  No client behaviour regresses — the only observable change is
+  "calls that used to error now succeed and return real results."
+- Public API additions: `ArmorError::Rmcp(String)` variant,
+  `pub(crate) MCP_PROTOCOL_VERSION` visibility, `ArmorRmcpHandler`
+  struct (already `pub` since v0.2). No removals, no signature
+  changes.
+
+### v0.8 backlog (intentionally deferred)
+
+- **H2 (R1 Critic):** hardcoded `id: 1` in
+  `dispatch_via_handle_request`'s synthetic JSON-RPC envelope is
+  log-correlation noise; the dispatch is synchronous and never
+  reaches the wire so it's not a correctness bug.
+- **M3 (R1 Critic):** `call_tool` could map `UnknownTool` to
+  `Err(McpError)` for stricter protocol semantics; v0.7 keeps the
+  SSOT-consistent `CallToolResult::error(...)` mapping with the
+  hand-rolled plane.
+- **L1 (R1 Critic):** `initialize()` could implement
+  protocolVersion down-negotiation for clients pinned to the
+  `2025-06-18` line (e.g. the Java SDK per
+  [java-sdk #715](https://github.com/modelcontextprotocol/java-sdk/issues/715)).
+  Defer until a real client breaks.
+- **Analyst Concern-3:** move `ArmorState` to a shared module so the
+  hand-rolled plane can reference it without the `rmcp-control`
+  feature gate.
+- **Analyst Concern-5:** call `crate::control::dispatch_tool()`
+  directly from `dispatch_via_handle_request` instead of constructing
+  a synthetic JSON-RPC envelope + re-parsing — saves one serde
+  round-trip per call.
+- **R1 Research F6:** add CVE-2026-34742 (Go MCP SDK DNS rebind,
+  CVSS 8.1) + MCP-Python-SDK <1.23.0 + 1 defense-in-depth
+  `mcp_file_op_path_traversal` entry to the curated CVE feed.
+- **R1 Research F4:** consider switching `rmcp::Error` references to
+  `rmcp::ErrorData` (the upstream deprecated-alias note suggests
+  `Error` will be renamed `RmcpError` in a future minor).
+- **`#[tool_router(server_handler)]` macro path** — revisit once the
+  hand-rolled plane gains `_meta.fingerprint` injection (SEP-2659)
+  and a single derive site for the schemas becomes attractive.
+- **`transport-streamable-http` with
+  `StreamableHttpService::with_allowed_hosts`** (the v0.7 CVE-2026-42559
+  fix surface): only land if an operator surfaces demand. stdio is
+  sufficient for the StudioMeyer dogfood loop.
+
+### Memory anchors
+
+- `nex_decide` v0.7 LIVE CONFIRMED 0.95 (recorded post-publish).
+- 3 must-read `nex_learn` Patterns: (1) rmcp 0.1 → 1.5 manual-impl
+  ServerHandler recipe + ServerInfo non-exhaustive + Implementation::new;
+  (2) Cross-plane parity test pattern (assert serialised
+  ProtocolVersion against shared const, not literal); (3) 2-round
+  agent-code-review LOOP pattern observed in v0.5/v0.6/v0.7 — R2
+  finds Cargo.toml comment honesty + invariant-completion that R1
+  fixes themselves miss.
+
 ## [0.6.0] — 2026-05-29
 
 This release is a **backlog-cleanup + interop pass** on top of v0.5.0

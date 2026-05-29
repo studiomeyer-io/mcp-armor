@@ -28,18 +28,14 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # `informational` if it becomes too noisy, but the security pitch is
 # stronger with strict gating.
 yanked = "deny"
+# v0.7 — `RUSTSEC-2024-0436` (`paste 1.0.15` upstream-archived) ignore
+# removed: the migration from `rmcp 0.1.5` to `rmcp 1.5` dropped the
+# transitive `paste` dep entirely. `cargo deny --all-features check`
+# confirms the advisory is "not encountered" in the v0.7 tree.
 ignore = [
     # Place RUSTSEC-IDs here ONLY with a dated note + planned fix.
     # Example (do NOT enable without rationale):
     # "RUSTSEC-2024-XXXX",  # 2026-05-22: tracked via #issue-N, fix in v0.3.1
-    #
-    # v0.4 — `paste 1.0.15` was archived upstream (dtolnay/paste). It is
-    # pulled in transitively from `rmcp 0.1.5` which we ship behind the
-    # opt-in `rmcp-control` feature; the v0.5 backlog migrates the
-    # control-plane to `rmcp 1.7.0` (official MCP Rust SDK), which drops
-    # the `paste` dep. Until then this advisory is tracked but not
-    # build-blocking. Re-evaluate when the v0.5 rmcp upgrade lands.
-    "RUSTSEC-2024-0436",
 ]
 
 # ── Bans (operator deny-list) ───────────────────────────────────────

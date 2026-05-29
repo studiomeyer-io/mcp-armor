@@ -1,10 +1,10 @@
 [package]
 name = "mcp-armor"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, detects tools/list schema drift (Layer 7 closes rug-pull / silent-redefinition class with NFKC-canonical fingerprint + bidirectional inbound/outbound gate + BLAKE3 or SHA-256 backend for FIPS/PCI/HIPAA + optional JCS RFC 8785 canonicalisation + _meta.fingerprint cross-tool audit injection), exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
+description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, detects tools/list schema drift (Layer 7 closes rug-pull / silent-redefinition class with NFKC-canonical fingerprint + bidirectional inbound/outbound gate + BLAKE3 or SHA-256 backend for FIPS/PCI/HIPAA + optional JCS RFC 8785 canonicalisation + _meta.fingerprint cross-tool audit injection), serves a fully-wired rmcp 1.5 control-plane behind the rmcp-control feature (MCP spec 2025-11-25, closes CVE-2026-42559 transitively), exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"
 homepage = "https://github.com/studiomeyer-io/mcp-armor"
 authors = ["Matthias Meyer (StudioMeyer) <hi@studiomeyer.io>"]
@@ -81,14 +81,40 @@ fs2 = "0.4"
 # same value with a fraction of the audit surface. reqwest::blocking is
 # already in the dep-cache used elsewhere in the StudioMeyer stack.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
-# v0.2 rmcp control-plane migration (PLAN R5). rmcp 0.1.x is what is on
-# crates.io as of 2026-05; the official MCP Rust SDK is still pre-1.0 with
-# feature-flag churn between minor versions. We pin 0.1 minimal-feature
-# ("server" + "transport-io") and build the rmcp control-plane module as a
-# thin re-export of our existing handle_request dispatcher rather than a
-# full macro-driven rewrite. The full `#[tool_router]` macro path lands in
-# v0.3 once the rmcp 1.x release stabilises its feature names.
-rmcp = { version = "0.1", default-features = false, features = ["server", "transport-io", "macros", "base64"], optional = true }
+# v0.7 — rmcp 0.1.5 → 1.5 migration. The official MCP Rust SDK reached
+# 1.0 (4t145/rmcp merged into the upstream
+# anthropic/modelcontextprotocol repository) and 1.4 added Host-header
+# validation that closes CVE-2026-42559 (DNS-rebinding via Streamable
+# HTTP server transport, CVSS 8.8 HIGH, PUBLIC on the NVD since
+# 2026-05-14, GHSA-89vp-x53w-74fx, RUSTSEC-2026-0140). We don't use the
+# Streamable HTTP transport (stdio only) so the CVE is not exploitable
+# in mcp-armor today, but upgrading the dep range closes the advisory
+# transitively in `cargo audit` / rustsec so downstream operators don't
+# see a yellow `cargo audit` after `cargo install mcp-armor`.
+#
+# The `version = "1.5"` constraint is a FLOOR per Cargo semver rules —
+# `^1.5` resolves to anything in `[1.5.0, 2.0.0)`. Cargo.lock today
+# resolves to rmcp 1.7.0 (latest at v0.7 tag time). 1.6 added the
+# StreamableHttpService Host-allowlist (the CVE patch itself); 1.7
+# added stdio parse-error replies + chrono default-features removal.
+# None of 1.5 → 1.7 changed the `ServerHandler` / `RequestContext` /
+# `CallToolRequestParams` / `MaybeSendFuture` surfaces our manual
+# `rmcp_server.rs` impl depends on, so the floor stays at 1.5 and the
+# resolver picks the highest available patch. A future 1.8+ release
+# that breaks the trait shape would fail to compile our impl and would
+# be a deliberate Cargo.toml floor bump.
+#
+# Feature set kept minimal: `server` + `transport-io` only. v0.7 R1
+# Analyst Concern-4 suggested `features = ["macros"]` could be removed
+# to shrink the audit surface; v0.7 R2 verified that the only effect of
+# that removal is dropping the `rmcp-macros` proc-macro crate from the
+# tree — `schemars` itself remains a non-optional dep of `rmcp 1.7.0`'s
+# core crate (it bounds `Tool::input_schema` and related model types
+# regardless of which feature flags are set). The audit surface
+# reduction is therefore the proc-macro machinery (`darling`,
+# `serde_derive_internals`, `rmcp-macros` itself) — non-trivial, just
+# not the `schemars` removal the R1 comment originally implied.
+rmcp = { version = "1.5", default-features = false, features = ["server", "transport-io"], optional = true }
 # v0.6 — RFC 8785 JSON Canonicalization Scheme (JCS) for tools/list
 # fingerprinting. When the `jcs-canonical` feature is on the drift
 # pipeline canonicalises the per-tool JSON sub-tree per RFC 8785 (sorted
