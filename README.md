@@ -1,3 +1,7 @@
+<!-- studiomeyer-mcp-stack-banner:start -->
+> **Part of the [StudioMeyer MCP Stack](https://studiomeyer.io)** — Built in Mallorca 🌴 · ⭐ if you use it
+<!-- studiomeyer-mcp-stack-banner:end -->
+
 # mcp-armor
 
 [![crates.io](https://img.shields.io/crates/v/mcp-armor.svg)](https://crates.io/crates/mcp-armor)
