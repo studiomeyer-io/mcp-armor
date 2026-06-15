@@ -2,7 +2,7 @@
 name = "mcp-armor"
 version = "0.7.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT"
 description = "Drop-in Rust sidecar that wraps any MCP server: scans tool calls for prompt injection (UTS-39 confusable-folding + Unicode strip + Aho+Regex), validates Ed25519 manifest signatures with TOFU keystore + Sigstore Rekor bridge, strips loader-class env keys (LD_PRELOAD, NODE_OPTIONS, ...) from spawned children, detects tools/list schema drift (Layer 7 closes rug-pull / silent-redefinition class with NFKC-canonical fingerprint + bidirectional inbound/outbound gate + BLAKE3 or SHA-256 backend for FIPS/PCI/HIPAA + optional JCS RFC 8785 canonicalisation + _meta.fingerprint cross-tool audit injection), serves a fully-wired rmcp 1.5 control-plane behind the rmcp-control feature (MCP spec 2025-11-25, closes CVE-2026-42559 transitively), exports OTLP gRPC telemetry, blocks marketplace-poisoning vectors. <5ms p99 overhead."
 repository = "https://github.com/studiomeyer-io/mcp-armor"
