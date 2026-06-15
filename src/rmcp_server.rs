@@ -58,8 +58,11 @@
 //! HTTP-served control-plane (stdio is sufficient for the StudioMeyer
 //! dogfood loop). The `auth` feature for OAuth-protected control-plane
 //! is deferred until a non-StudioMeyer operator surfaces the demand.
-
-#![cfg(feature = "rmcp-control")]
+//!
+//! Note: this module is feature-gated at its `mod` declaration in `lib.rs`
+//! (`#[cfg(feature = "rmcp-control")] pub mod rmcp_server;`). A second inner
+//! `#![cfg(...)]` here would be redundant — and is rejected as a duplicated
+//! attribute by some rustc versions (e.g. 1.88) — so it is intentionally absent.
 
 use crate::control::history::ScanHistory;
 use crate::error::ArmorError;

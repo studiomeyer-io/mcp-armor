@@ -17,10 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # MSRV bumped 1.75.0 -> 1.85.0 in v0.1.1: transitive deps from
-        # ed25519-dalek (pem feature) and clap pulled in crates that
-        # require `edition = "2024"`, which only stabilised in Rust 1.85.
-        rust: [1.85.0, stable]
+        # MSRV history: 1.75 -> 1.85 (v0.1.1, edition-2024 deps from
+        # ed25519-dalek/clap) -> 1.89 (v0.7 dep refresh). The icu 2.2.0 family
+        # (via regex/idna) needs rustc 1.86 and rmcp 1.7.0 uses let-chains
+        # (stabilised in 1.88); 1.89 gives a small buffer over both. Verified
+        # green locally on 1.89.0 with --all-features (clippy + full test set).
+        rust: [1.89.0, stable]
     steps:
       - uses: actions/checkout@v6
       - name: install rust ${{ matrix.rust }}
