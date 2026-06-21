@@ -10,7 +10,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/studiomeyer-io/mcp-armor/badge)](https://scorecard.dev/viewer/?uri=github.com/studiomeyer-io/mcp-armor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (with **TOFU keystore + Sigstore Rekor bridge** since v0.2), exports **OTLP gRPC telemetry** (on `opentelemetry 0.30` since v0.4 — closes the shutdown-hang class), blocks marketplace-poisoning vectors, **strips loader-class env keys from spawned children** (`LD_PRELOAD`, `NODE_OPTIONS`, … — new in v0.3), folds **Unicode confusables to detect homoglyph evasion** (Cyrillic `іgnоrе` ≈ `ignore` — new in v0.3). Single signed binary, p99 budget under 5 ms.
+Drop-in Rust sidecar that wraps any MCP server. Scans tool calls for prompt injection, validates Ed25519 manifest signatures (with **TOFU keystore + Sigstore Rekor bridge** since v0.2), exports **OTLP gRPC telemetry** (on `opentelemetry 0.30` since v0.4 — closes the shutdown-hang class), blocks marketplace-poisoning vectors, **strips loader-class env keys from spawned children** (`LD_PRELOAD`, `NODE_OPTIONS`, … — new in v0.3), folds **Unicode confusables to detect homoglyph evasion** (Cyrillic `іgnоrе` ≈ `ignore` — new in v0.3), strips **ANSI/terminal escape sequences** and flags **tool-name homoglyph collisions** on `tools/call` (both new in v0.7). Single signed binary, p99 budget under 5 ms (enforced in CI).
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
@@ -153,10 +153,12 @@ Hot-path is **four** stages (since v0.3), all in-process:
 
 1. **Aho-Corasick prefilter** — case-insensitive trigger strings sourced from the CVE feed (signal only — never drives Block on its own).
 2. **Regex stage** — compiled once on construction. Confirmed regex hits are the sole verdict signal.
-3. **Unicode normalize + re-scan** — strip zero-width (U+200B…U+200F, U+2060…U+2064, U+FEFF), Bidi formatting (U+202A…U+202E, U+2066…U+2069), and tag-unicode (U+E0000…U+E007F), apply NFKC, re-run stages 1 and 2. Gated by `policy.scan_unicode`.
+3. **Unicode normalize + re-scan** — strip **ANSI/CSI/OSC/C1 terminal escape sequences** (`\x1b[…`, OSC hyperlinks, the 8-bit C1 introducers — new in v0.7, closes terminal-escape "line-jumping" injection), zero-width (U+200B…U+200F, U+2060…U+2064, U+FEFF), Bidi formatting (U+202A…U+202E, U+2066…U+2069), and tag-unicode (U+E0000…U+E007F), apply NFKC, re-run stages 1 and 2. Gated by `policy.scan_unicode`.
 4. **(v0.3) UTS-39 confusable skeleton + re-scan** — fold Cyrillic / Greek / Cherokee / Latin-Extended look-alikes back to ASCII via a hand-curated ~180-entry table (`src/scanner/confusable.rs`), then re-run stages 1 and 2. Catches `іgnоrе previous instructions` where i / o / e are Cyrillic. Cheap pre-gate via `has_confusables()` keeps the p99 budget intact for pure-ASCII payloads. Gated by `policy.scan_confusable`.
 
-Performance budget: p99 < 5 ms on 100 kB payloads. CI gates a 7 ms hard cliff on `cargo bench --bench scanner`.
+On `tools/call`, mcp-armor also runs a **tool-name collision check** (new in v0.7, CVE-2026-29774 class): the incoming tool name is folded (NFKC + zero-width strip + UTS-39 confusable skeleton) and compared against the drift baseline's known-tool set. A name that *renders* identically to a trusted tool but carries different bytes (`send_message` + zero-width, Cyrillic `ѕend_message`) is blocked even when its arguments are benign. Active whenever a drift baseline exists (drift detection is on by default); a verbatim match or a genuinely new tool name is never flagged.
+
+Performance budget: p99 < 5 ms on 100 kB payloads. **Enforced in CI** by `tests/perf_gate.rs` (run in release as the `perf-gate` job): it times thousands of scans over representative payload sizes, computes the p99, and asserts it stays under the 5 ms budget. Measured p99 (release): ~18 µs on a clean 1 kB payload, ~1.05 ms on a 100 kB matching payload — about 4.5× under budget. (The criterion bench in `benches/scanner.rs` reports mean/median trend data but does not gate — criterion never emits a percentile, which is why the old `cargo bench -- --quick` step enforced nothing.)
 
 ## Loader-class env defence (v0.3)
 
@@ -182,7 +184,7 @@ This closes the **Zealynx 2026 stdio-config side-channel** where a registry-fetc
 | CVE-2026-31104 | medium | Tag-Unicode evasion of pattern scanners | n/a (defense-in-depth) |
 | CVE-2026-31312 | medium | Fullwidth-Unicode evasion of pattern scanners | n/a (defense-in-depth) |
 
-`cargo test --test cve_simulation` enforces the round-trip in CI. `armor_check_cve` does **semver-range matching** in v0.2 when both `server_version` is supplied AND the entry has an `affected_versions` range.
+The table above is the original v0.1.0 OX advisory wave. The compiled-in feed (`cve-feed/curated-2026-05-28.toml`) now carries **15 entries** — the 10 above plus the v0.5 refresh wave (rmcp DNS-rebinding CVE-2026-42559, n8n-mcp credential leak, Excel-MCP path traversal, the Lyrie tool-name-collision class CVE-2026-29774) and the v0.7 terminal-escape defense-in-depth entry (CVE-2026-31955). `cargo test --test cve_simulation` enforces the scan-round-trip for every entry in CI. `armor_check_cve` does **semver-range matching** when both `server_version` is supplied AND the entry has an `affected_versions` range.
 
 ## Compatibility
 
@@ -191,7 +193,7 @@ This closes the **Zealynx 2026 stdio-config side-channel** where a registry-fetc
 | Linux | x86_64 (gnu) | supported |
 | Linux | x86_64 (musl, static) | supported |
 | macOS | aarch64 | supported |
-| Windows | any | v0.3 backlog |
+| Windows | any | not yet supported (Linux + macOS only) |
 
 ## Telemetry
 
@@ -269,27 +271,32 @@ cargo test --all-features
 cargo bench --bench scanner
 ```
 
-173 tests pass on the default build (lib + 8 v0.4 regressions in
-`tests/integration_v04_features.rs` + the rest of the v0.2/v0.3
-integration suite), 172 with `--all-features` (one
-`cfg(not(feature = "sigstore-bridge"))` test correctly skipped). Per-
-feature breakdown in CHANGELOG v0.4.0 "Pre-tag gates run locally".
+**377 tests pass with `--all-features`, 371 on the default build** (the
+six extra are the `otlp` + `sigstore-bridge` + `rmcp-control`
+feature-gated tests). The suite spans the lib unit tests plus the
+per-feature integration suites (`tests/integration_*`), the
+`cve_simulation` round-trip, the v0.7 ANSI-escape + tool-name-collision
+coverage, and the `perf_gate` p99 budget assertion (release-only — see
+the Scanner pipeline section).
 
 ## Status
 
-**v0.4.x — production.** The four-stage scanner, Ed25519 verify, TOFU
-keystore (now `flock`-protected on concurrent pin), Sigstore bundle
-parser, OTLP exporter (on the `opentelemetry 0.30` SDK with the
-shutdown-hang class closed), the 9-tool control-plane, loader-class
-env-key strip, and UTS-39 confusable defence are all stable for daily
-use as a stdio sidecar in front of trusted MCP servers. v0.4 cashes in
-every documented v0.3-backlog item except the rmcp 1.x SDK migration
-and the Rekor-v2 tiles verifier, both of which are now v0.5 backlog
-with concrete crate targets (see CHANGELOG).
+**v0.7.x — production.** The four-stage scanner (now with ANSI/CSI/OSC
+terminal-escape stripping and tool-name homoglyph/zero-width collision
+detection added in v0.7), Ed25519 verify, TOFU keystore
+(`flock`-protected on concurrent pin), Sigstore bundle parser, OTLP
+exporter (on the `opentelemetry 0.30` SDK with the shutdown-hang class
+closed), the 10-tool control-plane, tools/list schema-drift detection
+(Layer 7), loader-class env-key strip, and UTS-39 confusable defence are
+all stable for daily use as a stdio sidecar in front of trusted MCP
+servers. v0.7 completed the rmcp 0.1.5 -> 1.5 SDK migration (closing
+CVE-2026-42559 transitively, MCP protocolVersion `2025-11-25`). The
+Rekor-v2 tiles verifier and the Fulcio cert-chain / TUF SET checks
+remain backlog (see CHANGELOG).
 
 | Area | Status |
 |---|---|
-| stdio proxy + scanner pipeline (4 stages) | shipped, p99 < 5 ms enforced in CI |
+| stdio proxy + scanner pipeline (4 stages) | shipped, p99 < 5 ms enforced in CI (`perf_gate` release test, measured ~1.05 ms p99 on 100 kB) |
 | Ed25519 manifest verify (stateless) | shipped |
 | TOFU keystore (`~/.local/share/mcp-armor/keys.toml`) | shipped in v0.2 |
 | **TOFU `flock`-protected concurrent pin (`persist_locked`)** | **shipped in v0.4** |
@@ -303,6 +310,9 @@ with concrete crate targets (see CHANGELOG).
 | `armor_check_cve` semver-range matching | shipped in v0.2 |
 | Loader-class env-key strip on `wrap` | shipped in v0.3 |
 | UTS-39 confusable skeleton (Stage 4) | shipped in v0.3 |
+| **ANSI/CSI/OSC terminal-escape stripping (Stage 3)** | **shipped in v0.7** |
+| **Tool-name homoglyph/zero-width collision detection on `tools/call` (CVE-2026-29774)** | **shipped in v0.7** |
+| **Scanner p99 budget enforced in CI (`perf_gate` release test)** | **shipped in v0.7** (was claimed-but-unenforced before) |
 | Supply-chain CI (CycloneDX SBOM + OSV + cargo-deny + Scorecard) | shipped in v0.3 |
 | **Audit-trail SHA-256 on RustCrypto `sha2` (replaces hand-rolled)** | **shipped in v0.4** |
 | **Parent-dir `fsync` after keystore atomic rename** | **shipped in v0.4** |
@@ -314,7 +324,7 @@ with concrete crate targets (see CHANGELOG).
 | Fulcio cert-chain verification | v0.5 backlog |
 | `tracing-opentelemetry 0.33` auto-bridge | v0.5 backlog |
 | mTLS client cert for OTLP gRPC | v0.5 backlog |
-| Windows targets | v0.5 backlog — Linux + macOS only |
+| Windows targets | backlog — not yet supported (Linux + macOS only) |
 
 Security disclosure policy: [SECURITY.md](SECURITY.md). Contributing
 guide: [CONTRIBUTING.md](CONTRIBUTING.md).
