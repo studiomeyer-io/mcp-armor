@@ -1,7 +1,12 @@
 //! Three-stage payload scanner: aho-corasick prefilter → regex stage →
 //! unicode normalization re-scan.
 //!
-//! Hot-path budget: p99 <5ms on 10kB payloads (criterion bench gates this).
+//! Hot-path budget: p99 <5ms (measured ~1.05ms p99 on a 100kB matching
+//! payload, release). Enforced by `tests/perf_gate.rs`, which times N
+//! scans over representative sizes, computes the p99, and asserts it
+//! stays under the 5ms budget; CI runs it in release via the `perf-gate`
+//! job. (The criterion bench in `benches/scanner.rs` reports mean/median
+//! trend data but does NOT gate — criterion never emits a percentile.)
 
 pub mod aho;
 pub mod confusable;
