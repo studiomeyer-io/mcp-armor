@@ -329,6 +329,17 @@ remain backlog (see CHANGELOG).
 Security disclosure policy: [SECURITY.md](SECURITY.md). Contributing
 guide: [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Part of the StudioMeyer MCP toolkit
+
+A small family of focused, production-grade tools for building and operating MCP servers:
+
+- **mcp-armor** *(this one)* — runtime defense sidecar: scans tool calls, verifies signed manifests, blocks known-bad CVEs
+- [mcp-gauntlet](https://github.com/studiomeyer-io/mcp-gauntlet) — pre-deploy fuzzer (`mcp-fuzz`) + load tester (`mcp-storm`)
+- [mcp-covenant](https://github.com/studiomeyer-io/mcp-covenant) — contract & breaking-change detector (semver for your MCP interface)
+- [mcp-herald](https://github.com/studiomeyer-io/mcp-herald) — static migration linter for the MCP 2026-07-28 spec
+
+Together: **armor** guards at runtime, **gauntlet** attacks before deploy, **covenant** watches your interface over time, **herald** gets you onto the new spec.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright 2026 Matthias Meyer (StudioMeyer).
