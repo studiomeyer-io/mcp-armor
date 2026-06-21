@@ -39,10 +39,13 @@
 //!
 //! Hot-path timings in an unoptimised (`cargo test`) build run ~10–30×
 //! slower than release, so a debug run would either need a meaningless
-//! threshold or would flake. The gate therefore **only asserts in
-//! release builds**; a debug run prints the measured numbers and skips
-//! the assertion with a clear note. The CI step that actually enforces
-//! the budget is `cargo test --release --test perf_gate -- --nocapture`.
+//! threshold or would flake. So in a debug build the test skips the
+//! measurement entirely (fast — `cargo test` / `cargo test
+//! --all-features` stay quick) and prints a note; set
+//! `MCP_ARMOR_PERF_FORCE=1` to run the measurement in debug anyway (it
+//! still skips the assertion there). The gate **only asserts in release
+//! builds**, and the CI step that enforces the budget is
+//! `cargo test --release --test perf_gate -- --nocapture`.
 
 use mcp_armor::Scanner;
 use std::time::Instant;
@@ -114,6 +117,25 @@ fn measure(scanner: &Scanner, input: &str, iters: usize) -> (f64, f64, f64, f64)
 
 #[test]
 fn scanner_p99_under_budget() {
+    let release = !cfg!(debug_assertions);
+    // A debug `cargo test` build runs the scanner ~10-30x slower than
+    // release, so the measured p99 would breach the 5 ms budget through
+    // build mode alone. Rather than flake (or assert a meaningless
+    // debug-only threshold), skip the heavy measurement in debug unless
+    // explicitly forced — this keeps `cargo test` / `cargo test
+    // --all-features` fast. CI enforces the real gate with
+    // `cargo test --release --test perf_gate`. Set MCP_ARMOR_PERF_FORCE=1
+    // to run the measurement in a debug build (prints numbers, still
+    // skips the assertion).
+    let force = std::env::var_os("MCP_ARMOR_PERF_FORCE").is_some();
+    if !release && !force {
+        println!(
+            "perf_gate: debug build — measurement skipped (set MCP_ARMOR_PERF_FORCE=1 \
+             to run it here). The enforced gate is `cargo test --release --test perf_gate`."
+        );
+        return;
+    }
+
     let iters: usize = std::env::var("MCP_ARMOR_PERF_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -130,16 +152,15 @@ fn scanner_p99_under_budget() {
         ("clean_1k", payload(1024, false), iters),
         ("match_1k", payload(1024, true), iters),
         ("match_10k", payload(10 * 1024, true), iters),
-        // 100 kB is ~5× the work; fewer iters keeps the test quick while
+        // 100 kB is ~5x the work; fewer iters keeps the test quick while
         // still giving a stable tail estimate.
         ("match_100k", payload(100 * 1024, true), iters / 5),
         ("cyrillic_2k", cyrillic, iters),
     ];
 
-    let release = !cfg!(debug_assertions);
     println!(
         "\n=== scanner p99 gate (budget {P99_BUDGET_MS:.1} ms, build={}) ===",
-        if release { "release" } else { "debug" }
+        if release { "release" } else { "debug (forced)" }
     );
 
     let mut worst_p99 = 0.0_f64;
@@ -166,7 +187,7 @@ fn scanner_p99_under_budget() {
         );
     } else {
         println!(
-            "(debug build — assertion skipped; the enforced gate is \
+            "(forced debug run — assertion skipped; the enforced gate is \
              `cargo test --release --test perf_gate`)"
         );
     }
