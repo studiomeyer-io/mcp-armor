@@ -59,7 +59,7 @@ cargo install mcp-armor --features 'otlp sigstore-bridge rmcp-control'
 > into any code path). It will return in a future release alongside the
 > actual SQLite-backed `ScanHistory` implementation.
 
-MSRV: **Rust 1.85** (bumped from 1.75 in v0.1.1 — transitive deps now require `edition = "2024"`).
+MSRV: **Rust 1.89** (1.75 -> 1.85 in v0.1.1 for `edition = "2024"` deps; -> 1.89 in v0.7 because the `icu 2.2.0` family via `regex`/`idna` needs 1.86 and `rmcp 1.7` uses let-chains stabilised in 1.88). `Cargo.toml` `rust-version`, `.clippy.toml` `msrv`, and the CI matrix are all pinned to 1.89 — a `cargo install` on 1.86-1.88 will not build despite the older docs claiming 1.85.
 
 ## Usage
 
