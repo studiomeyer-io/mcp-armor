@@ -90,14 +90,15 @@ mod tests {
     #[test]
     fn feed_parses() {
         let f = FEED().expect("feed must parse");
-        // v0.5 R1 Research-P1 fix: OX advisory wave 2026-04-15 (10 CVEs)
-        // + v0.5 refresh wave 2026-05-28 (4 CVEs: rmcp DNS-rebinding,
-        // n8n-mcp credential leak, Excel-MCP path traversal, Lyrie
-        // tool-name collision class). Total expected: 14.
+        // OX advisory wave 2026-04-15 (10 CVEs) + v0.5 refresh wave
+        // 2026-05-28 (4 CVEs: rmcp DNS-rebinding, n8n-mcp credential
+        // leak, Excel-MCP path traversal, Lyrie tool-name collision
+        // class) + v0.7 ANSI/terminal-escape defense-in-depth entry
+        // (CVE-2026-31955). Total expected: 15.
         assert_eq!(
             f.cves.len(),
-            14,
-            "expected exactly 14 CVEs (10 OX advisory + 4 v0.5 refresh wave)"
+            15,
+            "expected exactly 15 CVEs (10 OX advisory + 4 v0.5 refresh wave + 1 v0.7 ANSI entry)"
         );
     }
 
