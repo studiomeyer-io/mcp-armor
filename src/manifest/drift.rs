@@ -1079,6 +1079,75 @@ fn is_invisible_identifier_char(c: char) -> bool {
     )
 }
 
+/// v0.7 — fold an MCP identifier all the way down to its comparison
+/// skeleton: first [`canonicalize_identifier`] (strip zero-width / Bidi /
+/// tag-unicode + NFKC + trim), then the UTS-39 confusable skeleton
+/// ([`crate::scanner::confusable::skeleton`], which folds Cyrillic /
+/// Greek / Cherokee / Latin-Extended look-alikes to ASCII), then
+/// ASCII-lowercase. Two identifiers that a human (and an LLM) would read
+/// as "the same name" collapse to the same fold even when their raw
+/// bytes differ.
+///
+/// This is the comparison key used by [`tool_name_collision`] to catch
+/// the CVE-2026-29774 class (a tool registered under a name that
+/// visually collides with a trusted tool — `send_message` with a
+/// zero-width suffix, or Cyrillic `ѕend_message`).
+#[must_use]
+pub fn fold_identifier(raw: &str) -> String {
+    let canonical = canonicalize_identifier(raw);
+    let folded = crate::scanner::confusable::skeleton(&canonical);
+    folded.to_ascii_lowercase()
+}
+
+/// v0.7 — detect a tool-name homoglyph / zero-width collision against a
+/// set of known tool names. This is CVE-2026-29774's actual class: an
+/// adversary registers a tool whose name *renders* identically to a
+/// trusted tool but carries different bytes (zero-width insert, Cyrillic
+/// homoglyph, full-width form), so a model that "sees" the trusted name
+/// routes a call to the impostor.
+///
+/// Returns `Some(known_name)` — the legitimate name being impersonated —
+/// when `raw_name`:
+///
+/// 1. is **not** byte-equal to any entry in `known_names` (a verbatim
+///    match is the legitimate tool, never a collision), AND
+/// 2. folds (via [`fold_identifier`]) to the same skeleton as some
+///    known name's fold.
+///
+/// Returns `None` when the name matches a known tool verbatim, or folds
+/// to something no known tool folds to (an entirely new/unknown tool —
+/// that is drift's concern, not a collision), or `known_names` is empty
+/// (no baseline yet — never flag the bootstrap call).
+///
+/// Conservative by construction: a benign new tool name that does not
+/// resemble any known tool is never flagged, and a legitimate call to an
+/// existing tool (exact bytes) is never flagged.
+#[must_use]
+pub fn tool_name_collision(raw_name: &str, known_names: &[String]) -> Option<String> {
+    if known_names.is_empty() {
+        return None;
+    }
+    // A verbatim match is the real tool — not a collision.
+    if known_names.iter().any(|k| k == raw_name) {
+        return None;
+    }
+    let folded = fold_identifier(raw_name);
+    // Empty fold (e.g. a name that was nothing but invisible chars) is
+    // not a meaningful collision signal.
+    if folded.is_empty() {
+        return None;
+    }
+    for known in known_names {
+        // The known name folds to itself in the steady state, but fold
+        // it too so the comparison is symmetric and robust even if a
+        // baseline ever stored a non-canonical name.
+        if fold_identifier(known) == folded {
+            return Some(known.clone());
+        }
+    }
+    None
+}
+
 fn collect_param_names(t: &Value) -> Vec<String> {
     // Preferred MCP shape (`inputSchema.properties`).
     if let Some(props) = t
@@ -1864,6 +1933,106 @@ mod tests {
         assert!(
             fp.tools[0].required_set_hash.starts_with("blake3:"),
             "required hash should still be computed for the parameters shape"
+        );
+    }
+
+    // ─── v0.7 tool-name homoglyph / zero-width collision (CVE-2026-29774) ─
+
+    #[test]
+    fn fold_identifier_strips_zero_width_and_lowercases() {
+        // "send_message" with a trailing zero-width space folds to the
+        // bare lowercase name.
+        assert_eq!(fold_identifier("send_message\u{200B}"), "send_message");
+        assert_eq!(fold_identifier("Send_Message"), "send_message");
+        assert_eq!(fold_identifier("  trim_me  "), "trim_me");
+    }
+
+    #[test]
+    fn fold_identifier_folds_cyrillic_homoglyphs() {
+        // Cyrillic ѕ (U+0455) + e (U+0435) + о (U+043E) homoglyphs fold
+        // to ASCII so "ѕend_message" folds to "send_message".
+        let cyrillic = "\u{0455}end_m\u{0435}ssag\u{0435}";
+        assert_eq!(fold_identifier(cyrillic), "send_message");
+    }
+
+    #[test]
+    fn tool_name_collision_catches_zero_width_suffix() {
+        // The literal CVE-2026-29774 example: send_message with a
+        // zero-width space suffix collides with the trusted send_message.
+        let known = vec!["send_message".to_string(), "get_weather".to_string()];
+        let attacker = "send_message\u{200B}";
+        assert_eq!(
+            tool_name_collision(attacker, &known),
+            Some("send_message".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_name_collision_catches_cyrillic_homoglyph() {
+        let known = vec!["send_message".to_string()];
+        let attacker = "\u{0455}end_m\u{0435}ssag\u{0435}"; // Cyrillic ѕ/е/о
+        assert_eq!(
+            tool_name_collision(attacker, &known),
+            Some("send_message".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_name_collision_catches_fullwidth_homoglyph() {
+        let known = vec!["delete_file".to_string()];
+        // Full-width "delete_file" — NFKC inside canonicalize_identifier
+        // folds it to ASCII.
+        let attacker = "ｄｅｌｅｔｅ＿ｆｉｌｅ";
+        assert_eq!(
+            tool_name_collision(attacker, &known),
+            Some("delete_file".to_string())
+        );
+    }
+
+    /// CRITICAL false-positive guard: an exact byte-match to a known
+    /// tool is the legitimate tool, never a collision.
+    #[test]
+    fn tool_name_collision_exact_match_is_not_flagged() {
+        let known = vec!["send_message".to_string(), "get_weather".to_string()];
+        assert_eq!(tool_name_collision("send_message", &known), None);
+        assert_eq!(tool_name_collision("get_weather", &known), None);
+    }
+
+    /// CRITICAL false-positive guard: a genuinely new tool that does not
+    /// resemble any known tool is NOT a collision (that is drift's job).
+    #[test]
+    fn tool_name_collision_unrelated_new_tool_is_not_flagged() {
+        let known = vec!["send_message".to_string(), "get_weather".to_string()];
+        assert_eq!(tool_name_collision("list_alarms", &known), None);
+        assert_eq!(tool_name_collision("totally_unrelated", &known), None);
+    }
+
+    /// CRITICAL false-positive guard: empty known set (no baseline yet)
+    /// never flags — the bootstrap call must pass.
+    #[test]
+    fn tool_name_collision_empty_known_set_is_not_flagged() {
+        assert_eq!(tool_name_collision("send_message\u{200B}", &[]), None);
+    }
+
+    /// A name that is only invisible characters folds to empty and must
+    /// not be reported as a collision.
+    #[test]
+    fn tool_name_collision_all_invisible_name_is_not_flagged() {
+        let known = vec!["send_message".to_string()];
+        assert_eq!(tool_name_collision("\u{200B}\u{200C}", &known), None);
+    }
+
+    /// Similar-but-distinct names (underscore vs nothing) must NOT
+    /// collide — folding does not collapse separators.
+    #[test]
+    fn tool_name_collision_distinct_names_do_not_collide() {
+        let known = vec!["send_message".to_string()];
+        // "sendmessage" (no underscore) folds to "sendmessage" != "send_message".
+        assert_eq!(tool_name_collision("sendmessage", &known), None);
+        assert_eq!(fold_identifier("sendmessage"), "sendmessage");
+        assert_ne!(
+            fold_identifier("sendmessage"),
+            fold_identifier("send_message")
         );
     }
 }

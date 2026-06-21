@@ -59,14 +59,28 @@ jobs:
       - name: cve simulation
         run: cargo test --test cve_simulation -- --nocapture
 
-  bench:
-    name: bench regression gate
+  perf-gate:
+    name: scanner p99 latency gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: bench
+      # Real percentile gate. `tests/perf_gate.rs` times N scans over
+      # representative payload sizes (clean/match 1k/10k/100k + a
+      # Stage-4 confusable payload), computes the p99, prints every
+      # percentile, and ASSERTS the worst p99 stays under the documented
+      # 5 ms budget. Release mode is mandatory - a debug build runs
+      # ~10-30x slower and the test skips its assertion there on purpose.
+      # This replaces the old `cargo bench -- --quick` step which exited
+      # 0 unconditionally (criterion emits mean/median, never a
+      # percentile, so it never enforced the README's "p99 < 5 ms" claim).
+      - name: scanner p99 gate
+        run: cargo test --release --test perf_gate -- --nocapture
+      # Keep the criterion bench as a compile + smoke check so the
+      # mean/median trend data stays available (it does NOT gate - the
+      # assertion above does).
+      - name: criterion bench (smoke, non-gating)
         run: cargo bench --bench scanner -- --quick
 
   audit:

@@ -1,2 +1,8 @@
 avoid-breaking-exported-api = false
-msrv = "1.85"
+# MSRV is the true minimum the dep tree compiles on: the icu 2.2.0 family
+# (via regex/idna) needs rustc 1.86 and rmcp 1.7.0 uses let-chains
+# (stabilised in 1.88), so 1.89 is the real floor. Kept in lock-step with
+# `Cargo.toml` `rust-version` and the CI matrix so clippy stops emitting the
+# "MSRV in clippy.toml and Cargo.toml differ" note (it was 1.85 here vs 1.89
+# there, which also mis-advertised the install floor in the README).
+msrv = "1.89"

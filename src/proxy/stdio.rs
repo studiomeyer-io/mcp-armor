@@ -9,7 +9,7 @@ use crate::control::history::ScanHistory;
 use crate::error::ArmorError;
 use crate::manifest::drift::{
     self, default_path as drift_default_path, drift_block_inbound_response, drift_block_response,
-    inject_fingerprint_meta, DriftKind, DriftMode, History as DriftHistory,
+    inject_fingerprint_meta, tool_name_collision, DriftKind, DriftMode, History as DriftHistory,
 };
 use crate::policy::{snapshot, FailMode, Policy, PolicyHandle};
 use crate::scanner::{ScanResult, ScanVerdict, Scanner};
@@ -428,7 +428,7 @@ pub async fn run_proxy(
             // this fix, `scan_with(payload, scan_unicode)` hard-coded
             // Stage 4 = on (`scan_confusable=true`) and the new
             // `policy.scan_confusable` field was a dead knob.
-            let result =
+            let mut result =
                 scanner_in.scan_with_opts(&scan_target, pol.scan_unicode, pol.scan_confusable);
             let tool_name = extract_tool_name(&envelope);
 
@@ -445,7 +445,54 @@ pub async fn run_proxy(
 
             let allow_pattern = allow_pattern_global || allow_pattern_per_tool;
 
-            let blocked = matches!(result.verdict, ScanVerdict::Block) && !allow_pattern;
+            // v0.7 — tool-name homoglyph / zero-width collision check
+            // (CVE-2026-29774 class). The drift baseline is the known-tool
+            // set; a `tools/call` whose name folds (canonicalise +
+            // confusable skeleton) to a known tool but whose raw bytes are
+            // NOT that tool is an impersonation attempt. Stage 4 only folds
+            // the *scanned payload* (which includes the raw name in
+            // `scan_target`); it does not compare that name against the
+            // trusted set, so a confusable name with benign args otherwise
+            // slips through. Gated on a baseline existing — no baseline
+            // (drift Off, or first sight) means no known set and no flag,
+            // so legitimate bootstrap calls are never blocked. This block
+            // is NOT subject to `allow_patterns` (a homoglyph collision is
+            // never something an operator allows by allow-listing an
+            // unrelated pattern id) but it DOES respect `allow_servers`
+            // (handled above — an explicitly trusted upstream skips
+            // scanning entirely, the documented contract).
+            let collision = detect_tool_name_collision(
+                tool_name.as_deref(),
+                &pol,
+                &program_for_in,
+                &drift_history_path_in,
+            );
+            if let Some(impersonated) = &collision {
+                if !result
+                    .matched_patterns
+                    .iter()
+                    .any(|p| p == TOOL_NAME_COLLISION_PATTERN)
+                {
+                    result
+                        .matched_patterns
+                        .push(TOOL_NAME_COLLISION_PATTERN.to_string());
+                }
+                if !result.cve_refs.iter().any(|c| c == TOOL_NAME_COLLISION_CVE) {
+                    result.cve_refs.push(TOOL_NAME_COLLISION_CVE.to_string());
+                }
+                result.verdict = ScanVerdict::Block;
+                tracing::warn!(
+                    program = %program_for_in,
+                    raw_tool = %tool_name.as_deref().unwrap_or(""),
+                    impersonated = %impersonated,
+                    "tool-name homoglyph/zero-width collision: incoming tools/call name folds to a trusted tool but is not byte-equal (CVE-2026-29774 class)"
+                );
+            }
+
+            // A collision is a hard block regardless of the pattern
+            // allowlist; the scan verdict still honours `allow_pattern`.
+            let blocked = collision.is_some()
+                || (matches!(result.verdict, ScanVerdict::Block) && !allow_pattern);
 
             if blocked {
                 history_in.record("inbound", &result);
@@ -639,6 +686,60 @@ pub async fn run_proxy(
     Ok(())
 }
 
+/// v0.7 — matched-pattern id surfaced when a `tools/call` carries a
+/// tool name that collides (homoglyph / zero-width / full-width) with a
+/// known tool in the drift baseline. Appears in `armor_list_blocked` +
+/// the JSON-RPC block error so the operator sees *why* the call was
+/// refused.
+pub(crate) const TOOL_NAME_COLLISION_PATTERN: &str = "tool_name_collision";
+
+/// v0.7 — CVE this collision class corresponds to (Lyrie MCP-1.4
+/// tool-name collision batch). Surfaced in the block's `cve_refs`.
+pub(crate) const TOOL_NAME_COLLISION_CVE: &str = "CVE-2026-29774";
+
+/// v0.7 — detect a tool-name homoglyph / zero-width collision for an
+/// inbound `tools/call`, using the drift baseline as the known-tool set.
+///
+/// Returns `Some(impersonated_known_name)` only when ALL of:
+/// - `tool_name` is `Some` (the envelope is a `tools/call`),
+/// - drift detection is not `Off` (otherwise no baseline is maintained),
+/// - a baseline exists for `program`, and
+/// - [`tool_name_collision`] fires (the raw name folds to a known tool
+///   but is not byte-equal to it).
+///
+/// Returns `None` (no flag) in every other case — non-tools/call
+/// traffic, drift off, no baseline yet (bootstrap), an exact-match
+/// legitimate call, or a genuinely new tool that resembles nothing
+/// known. A history load error is logged and treated as `None` so the
+/// collision check never blocks a legitimate call just because the
+/// history file is unreadable (same fail-open posture as the outbound
+/// drift sweep).
+fn detect_tool_name_collision(
+    tool_name: Option<&str>,
+    policy: &Policy,
+    program: &str,
+    history_path: &std::path::Path,
+) -> Option<String> {
+    let raw_name = tool_name?;
+    if policy.tools_list_drift_detection == DriftMode::Off {
+        return None;
+    }
+    let history = match DriftHistory::load(history_path) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                path = %history_path.display(),
+                "tool-name collision check: history load failed — passing call through"
+            );
+            return None;
+        }
+    };
+    let baseline = history.find(program)?;
+    let known: Vec<String> = baseline.tools.iter().map(|t| t.name.clone()).collect();
+    tool_name_collision(raw_name, &known)
+}
+
 /// v0.2 — extract the tool name from a `tools/call` envelope. Used by the
 /// per-tool allowlist to decide whether to override a Block verdict.
 /// Returns `None` for non-tools/call methods or malformed envelopes.
@@ -778,5 +879,132 @@ mod tests {
             "method": "tools/call"
         });
         assert_eq!(extract_tool_name(&env), None);
+    }
+
+    // ─── v0.7 tool-name homoglyph collision — proxy-path integration ────
+
+    /// Build a real on-disk drift baseline with a known `send_message`
+    /// tool, then exercise the exact `detect_tool_name_collision` helper
+    /// the inbound proxy hot-path calls.
+    ///
+    /// Proves the behaviour change: a `tools/call` to a Cyrillic /
+    /// zero-width variant of a trusted tool is now flagged (the scanner
+    /// alone returns Allow for such a name with benign args — see the
+    /// `prev_passed` gap proof in the PR description), and the legitimate
+    /// exact-byte call is not flagged.
+    #[test]
+    fn detect_tool_name_collision_flags_confusable_call_against_baseline() {
+        use crate::manifest::drift::History as DriftHistory;
+        let dir = tempfile::tempdir().expect("tmp");
+        let hist_path = dir.path().join("tools-history.toml");
+
+        // Baseline: a server that publishes `send_message` + `get_weather`.
+        let tools_list = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {"name": "send_message", "description": "Send a message",
+                     "inputSchema": {"type": "object",
+                        "properties": {"to": {"type": "string"}, "body": {"type": "string"}},
+                        "required": ["to", "body"]}},
+                    {"name": "get_weather", "description": "Weather",
+                     "inputSchema": {"type": "object",
+                        "properties": {"city": {"type": "string"}}, "required": ["city"]}}
+                ]
+            }
+        });
+        let mut hist = DriftHistory::empty();
+        hist.observe(
+            "/usr/local/bin/msg-server",
+            &tools_list,
+            "2026-06-21T00:00:00Z",
+        )
+        .expect("observe baseline");
+        hist.persist(&hist_path).expect("persist baseline");
+
+        let program = "/usr/local/bin/msg-server";
+        // Default policy: drift detection is Warn (baselines maintained).
+        let pol = Policy::default();
+
+        // Cyrillic-homoglyph "send_message" — collision.
+        let cyrillic = "\u{0455}end_m\u{0435}ssag\u{0435}";
+        assert_eq!(
+            detect_tool_name_collision(Some(cyrillic), &pol, program, &hist_path),
+            Some("send_message".to_string()),
+            "Cyrillic-homoglyph tool name must be flagged as a collision"
+        );
+
+        // Zero-width-suffixed "send_message" — collision.
+        assert_eq!(
+            detect_tool_name_collision(Some("send_message\u{200B}"), &pol, program, &hist_path),
+            Some("send_message".to_string()),
+            "zero-width-suffixed tool name must be flagged"
+        );
+
+        // Legitimate exact call — NOT flagged.
+        assert_eq!(
+            detect_tool_name_collision(Some("send_message"), &pol, program, &hist_path),
+            None,
+            "exact-byte legitimate call must not be flagged"
+        );
+
+        // Genuinely unrelated new tool — NOT flagged (drift's job).
+        assert_eq!(
+            detect_tool_name_collision(Some("list_alarms"), &pol, program, &hist_path),
+            None,
+            "unrelated new tool must not be flagged as a collision"
+        );
+
+        // Non-tools/call (no tool name) — NOT flagged.
+        assert_eq!(
+            detect_tool_name_collision(None, &pol, program, &hist_path),
+            None
+        );
+    }
+
+    /// Gating: with `tools_list_drift_detection = Off` the collision
+    /// check is a no-op even when a baseline file exists.
+    #[test]
+    fn detect_tool_name_collision_is_gated_off_when_drift_off() {
+        use crate::manifest::drift::{DriftMode, History as DriftHistory};
+        let dir = tempfile::tempdir().expect("tmp");
+        let hist_path = dir.path().join("tools-history.toml");
+        let tools_list = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [
+                {"name": "send_message", "description": "x",
+                 "inputSchema": {"type": "object", "properties": {}, "required": []}}
+            ]}
+        });
+        let mut hist = DriftHistory::empty();
+        hist.observe("/bin/s", &tools_list, "2026-06-21T00:00:00Z")
+            .expect("observe");
+        hist.persist(&hist_path).expect("persist");
+
+        let pol = Policy {
+            tools_list_drift_detection: DriftMode::Off,
+            ..Policy::default()
+        };
+        let cyrillic = "\u{0455}end_m\u{0435}ssag\u{0435}";
+        assert_eq!(
+            detect_tool_name_collision(Some(cyrillic), &pol, "/bin/s", &hist_path),
+            None,
+            "drift Off must disable collision detection"
+        );
+    }
+
+    /// Gating: no baseline file (bootstrap, first sight) — never flag.
+    #[test]
+    fn detect_tool_name_collision_no_baseline_is_not_flagged() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let hist_path = dir.path().join("does-not-exist.toml");
+        let pol = Policy::default();
+        let cyrillic = "\u{0455}end_m\u{0435}ssag\u{0435}";
+        assert_eq!(
+            detect_tool_name_collision(Some(cyrillic), &pol, "/bin/never-seen", &hist_path),
+            None,
+            "no baseline means no known set means no flag"
+        );
     }
 }
