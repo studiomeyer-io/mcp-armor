@@ -337,6 +337,7 @@ A small family of focused, production-grade tools for building and operating MCP
 - [mcp-gauntlet](https://github.com/studiomeyer-io/mcp-gauntlet) — pre-deploy fuzzer (`mcp-fuzz`) + load tester (`mcp-storm`)
 - [mcp-covenant](https://github.com/studiomeyer-io/mcp-covenant) — contract & breaking-change detector (semver for your MCP interface)
 - [mcp-herald](https://github.com/studiomeyer-io/mcp-herald) — static migration linter for the MCP 2026-07-28 spec
+- [mcp-passport](https://github.com/studiomeyer-io/mcp-passport) — publish-readiness validator for the MCP Registry
 
 Together: **armor** guards at runtime, **gauntlet** attacks before deploy, **covenant** watches your interface over time, **herald** gets you onto the new spec.
 
