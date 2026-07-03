@@ -152,6 +152,25 @@ pub struct Policy {
     /// by default — additive feature.
     #[serde(default)]
     pub inject_fingerprint_meta: bool,
+    /// v0.8 Layer 8 — Tool-Description / Full-Schema Poisoning scan mode.
+    /// Complements Layer 7: where drift catches *changes* to a pinned
+    /// tools/list (rug-pull), Layer 8 walks the description + full schema
+    /// of every tool on *first sight* and flags model-directed
+    /// instructions (Invariant Labs Tool Poisoning, CyberArk Full-Schema
+    /// Poisoning, OWASP MCP03). Three modes:
+    ///
+    /// - `off`: Layer 8 bypassed entirely.
+    /// - `warn`: default. Poisoning logs at `tracing::warn!`; the
+    ///   tools/list response passes through unchanged.
+    /// - `block`: the proxy replaces the poisoned tools/list result with
+    ///   a JSON-RPC error (code -32002) so the model never reads the
+    ///   poisoned catalog.
+    ///
+    /// Like drift, this runs independent of `allow_servers` — a poisoned
+    /// catalog from an otherwise-trusted-but-compromised upstream is
+    /// exactly the residual risk allow-listing does not cover.
+    #[serde(default)]
+    pub tools_list_poison_scan: crate::scanner::tool_poison::PoisonMode,
     pub version: String,
 }
 
@@ -181,6 +200,7 @@ impl Default for Policy {
             tools_list_hash_backend: HashBackend::default(),
             tools_list_jcs_canonicalize: false,
             inject_fingerprint_meta: false,
+            tools_list_poison_scan: crate::scanner::tool_poison::PoisonMode::default(),
             version: "default".to_string(),
         }
     }

@@ -5,9 +5,12 @@ use std::sync::OnceLock;
 // v0.5 R2 Analyst-W2 fix: file renamed from `ox-advisory-2026-04-15.toml`
 // to `curated-2026-05-28.toml` to reflect that the feed now combines
 // the OX advisory wave with Lyrie + rmcp + n8n-mcp + Excel-MCP refresh
-// CVEs from 2026-05-28. Old name was misleading once the curation
-// stopped being OX-only.
-const FEED_TOML: &str = include_str!("../../cve-feed/curated-2026-05-28.toml");
+// CVEs. v0.8 rename to `curated-2026-07-03.toml` — the feed gained the
+// v0.7 ANSI/terminal-escape entry and the v0.8 filesystem
+// path-traversal defense-in-depth entry, so the dated name tracks the
+// last curation pass. Old name was misleading once the curation stopped
+// being OX-only.
+const FEED_TOML: &str = include_str!("../../cve-feed/curated-2026-07-03.toml");
 
 /// CVE severity level. Constrained enum (was `String` — F9 lift).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -94,12 +97,24 @@ mod tests {
         // 2026-05-28 (4 CVEs: rmcp DNS-rebinding, n8n-mcp credential
         // leak, Excel-MCP path traversal, Lyrie tool-name collision
         // class) + v0.7 ANSI/terminal-escape defense-in-depth entry
-        // (CVE-2026-31955). Total expected: 15.
+        // (CVE-2026-31955) + v0.8 filesystem path-traversal
+        // defense-in-depth entry (CVE-2026-53881). Total expected: 16.
         assert_eq!(
             f.cves.len(),
-            15,
-            "expected exactly 15 CVEs (10 OX advisory + 4 v0.5 refresh wave + 1 v0.7 ANSI entry)"
+            16,
+            "expected exactly 16 CVEs (10 OX advisory + 4 v0.5 refresh + 1 v0.7 ANSI + 1 v0.8 path-traversal)"
         );
+    }
+
+    /// v0.8 — the filesystem path-traversal defense-in-depth entry must be
+    /// present and keyed to the new `path_traversal` scanner pattern.
+    #[test]
+    fn feed_contains_v08_path_traversal_cve() {
+        let f = FEED().expect("feed must parse");
+        let c = f
+            .find("CVE-2026-53881")
+            .expect("v0.8 path-traversal CVE missing from feed");
+        assert_eq!(c.expected_pattern_id, "path_traversal");
     }
 
     /// v0.5 R1 Research-P1 — verify the 4 new CVE IDs from the refresh

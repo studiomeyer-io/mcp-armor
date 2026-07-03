@@ -4,6 +4,157 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-07-03
+
+### Layer 8 — Tool-Description / Full-Schema Poisoning detection
+
+Layer 7 (v0.5, `manifest::drift`) closes the **rug-pull** class: it
+fingerprints the first-seen `tools/list` and flags subsequent *changes*.
+But the first-seen baseline is trusted as given — a server that ships a
+**poisoned catalog on the very first connection** establishes a poisoned
+baseline and Layer 7 never fires, because nothing *changed*. The
+hot-path argument scanner closes a different seam: it inspects tool-*call*
+arguments at invocation time, not the tool *catalog* the model reads when
+deciding which tool to call.
+
+Layer 8 closes the residual seam with a **structured, first-sight,
+block-capable** sweep over every `tools/list` response. It walks each
+tool's description and its full input/output schema — parameter
+descriptions, `enum` values, `default`s, `title`s, `const`s, `examples`,
+recursively — looking for instructions aimed at the *model* rather than
+shell payloads aimed at the *host*. This is the **Tool Poisoning Attack
+(TPA)** class from Invariant Labs' April-2025 notification, the
+**Full-Schema Poisoning (FSP)** extension from CyberArk (the injection
+lives in a parameter's schema, not the top-level description), and
+**OWASP MCP Top 10 (2026) MCP03 — Tool Poisoning**. The Coalition for
+Secure AI catalogues the same class as MCP-T4 with "hidden prompt
+embedding (Unicode attacks)" as a named variant — so every field runs
+through the same Stage-3 Unicode strip + Stage-4 confusable fold the
+argument scanner uses, folding `<!-- іgnоre previous instructions -->`
+(Cyrillic homoglyphs) and zero-width-obfuscated directives back to ASCII
+before matching.
+
+- **New module `src/scanner/tool_poison.rs`.** `PoisonMode` (off / warn /
+  block, default **warn** — fail-open-but-visible, symmetric with
+  `DriftMode`), `ToolPoisonFinding { tool, field, pattern_id, severity,
+  snippet }`, `scan_tools_list()`, `block_eligible()`,
+  `poison_block_response()` (JSON-RPC error code **-32002**, distinct from
+  Layer 7's -32001).
+- **Tiered precision model.** Patterns carry a `PoisonSeverity`. **Strong**
+  signals — `poison_injection_override` (ignore/override prior
+  instructions), `poison_suppress_user` (hide this from the human),
+  `poison_exfil_directive` (a secret steered to a *sink*),
+  `poison_prompt_extraction` (reveal the system/developer prompt),
+  `poison_hidden_markup` (`<IMPORTANT>` tags / instruction-bearing HTML
+  comments) — are precise enough to block on their own. **Weak** signals —
+  `poison_soft_directive` ("before using this tool … read/send",
+  "you must … send"), `poison_tool_shadowing` — are common in real docs,
+  so a lone weak hit only *warns*: a catalog is **block-eligible** only
+  when a tool carries a strong signal OR corroborates two distinct signal
+  classes. This keeps a legitimate secrets/vault server ("read the value
+  of a secret …" — no sink, no directive) and ubiquitous phrasings ("you
+  must provide an API key", "before calling this tool, clone the repo")
+  from tripping `block`.
+- **English + German + Spanish lexicon** for the injection-override and
+  suppress-user classes.
+- **Cross-field assembly.** Beyond scanning each field, the tool's string
+  leaves are concatenated into one bounded haystack and scanned together,
+  catching the Full-Schema-Poisoning technique of *splitting* a directive
+  across a description + a `default` + an `enum` where no single field
+  self-matches (surfaced under the `<assembled>` field).
+- **Bounded walk (DoS-hardened).** One shared node budget (16 384 visits)
+  spans the whole `tools` array — every tool entry, every top-level field,
+  and every nested object/array child charges it — so a wide `tools`
+  array, a tool with millions of top-level keys, and a deeply-nested
+  schema (depth cap 12) are all bounded by the same ceiling.
+- **`allow_patterns` honoured for poison ids.** An operator can silence a
+  benign pattern on a trusted upstream (the same knob the argument scanner
+  uses) instead of turning Layer 8 off wholesale.
+- **Policy field `tools_list_poison_scan`** (`#[serde(default)]` = warn) —
+  existing `policy.toml` files load unchanged. Runs independent of
+  `allow_servers`, like Layer 7: a poisoned catalog from an
+  otherwise-trusted-but-compromised upstream is exactly the residual risk
+  allow-listing doesn't cover. In `warn` mode it is **log-only** (nothing
+  is written to the block ring, which holds blocks, not detections);
+  `block` mode records to the ring + emits the OTLP block span.
+- **Proxy wiring** via the extracted, unit-tested `run_poison_check` +
+  `resolve_outbound_decision`. A poison **block** supersedes a Layer 7
+  `_meta.fingerprint` stamp (`PassThroughWithMeta`) but never overrides a
+  Layer 7 `Replace` (both are blocks; drift ran first) — the full 3×2
+  precedence matrix is table-tested.
+- **11th control-plane tool `armor_scan_tools_list`** (read-only) — paste
+  a captured `tools/list` (object or JSON string, 2 MiB cap) and get a
+  structured poisoning report (`poisoned`, `block_eligible`, per-field
+  findings with severity). `armor_get_policy` now surfaces
+  `tools_list_poison_scan`.
+- **Scope (honest boundaries).** Layer 8 scans the tools/list *catalog*.
+  It does NOT cover ATPA (injection in a tool's *output*, fires after a
+  call), base64/hex-encoded directives, or languages beyond EN/DE/ES —
+  all documented as v0.9 backlog rather than implied.
+
+### `path_traversal` scanner pattern + CVE-feed refresh
+
+- **New `path_traversal` scanner pattern** (Aho + regex) requiring a
+  *repeated* climb so a single legitimate relative path (`./data/x`,
+  `../shared/y`) never false-positives. The regex tolerates no-op path
+  noise between the two `..` climbs (`.././../`, `..//../`, `..%2f..%2f`)
+  so an attacker cannot defeat the detector by wedging a `.` segment or a
+  doubled slash between the climbs. A *net* single climb (`../shared/../x`)
+  correctly does not match. Closes OWASP MCP05 (file-system exposure) —
+  Practical DevSecOps' 2026 survey found 82% of scanned MCP
+  implementations carry a path-traversal exposure.
+- **CVE feed renamed** `curated-2026-05-28.toml` → `curated-2026-07-03.toml`
+  with the new defense-in-depth entry `CVE-2026-53881` (filesystem-class
+  MCP path traversal) keyed to the `path_traversal` pattern. 16 CVEs
+  total.
+
+### Release hygiene
+
+- **`server.json` synced** to 0.8.0 / OCI tag `:0.8.0` / "11 tools" (it
+  had drifted to 0.7.0 / "10 tools"), and a new
+  `tests/server_json_provenance.rs` fails the build if the registry
+  manifest version, OCI tag, or advertised tool count fall out of sync
+  with the crate — so the Official MCP Registry never publishes stale
+  provenance again.
+
+### Tests + gates
+
+- +49 tests (26 `tool_poison` unit incl. false-positive, cross-field and
+  DoS-bound guards, 11 `run_poison_check` + `resolve_outbound_decision`
+  proxy-wiring unit, an end-to-end `path_traversal` scanner test,
+  `tests/integration_tool_poison_v08.rs`, `server_json_provenance`, plus
+  pattern/feed round-trip pins). **434 all-features / 428
+  no-default-features**, all green.
+- `cargo clippy --all-targets --all-features -- -D warnings` and
+  `--no-default-features` clean; `cargo fmt --check` clean;
+  `cargo deny --all-features check` clean (bumped `anyhow` 1.0.102 →
+  1.0.103 to clear RUSTSEC `downcast_mut` UB advisory); release
+  `perf_gate` p99 under the 5 ms budget with the new pattern.
+
+### Review
+
+Layer 8 shipped after a **three-agent adversarial review** (a bug-hunting
+critic, a threat-model / false-positive analyst, and a holistic
+engineering pass) plus a **verification round**. Round 1 caught and fixed:
+an unbounded node-budget DoS on wide tool objects, a `path_traversal`
+adjacency bypass (`.././../`), a false-positive class on legitimate
+secrets/auth servers, the missing corroboration gate for `block` mode, a
+stale `server.json`, and a warn-mode audit-trail no-op. Round 2 verified
+those fixes (including a reversible `server.json` mutation to prove the
+new provenance test isn't a tautology) and caught one more: the
+encoded-backslash traversal `..%5c..%5c` had a regex but no Aho prefilter
+needle, so it never reached the regex — fixed and pinned with an
+end-to-end scanner test. See the tiered precision model above.
+
+### Notes
+
+- **Backwards compatible.** All new policy toggles are
+  `#[serde(default)]`; the control-plane gains one additive tool (10 →
+  11); no public API removals or signature changes. `tools_list_poison_scan`
+  defaults to `warn`, so an existing `wrap` setup starts *reporting*
+  first-sight poisoning without blocking anything.
+- Co-authored with **Claude Fable 5** (see `AUTHORS.md`).
+
 ## [0.7.0] — 2026-05-29
 
 This release closes the **rmcp 0.1.5 → 1.5 migration** that the v0.5

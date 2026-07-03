@@ -432,18 +432,21 @@ fn r2_w5_param_names_dedupe_after_canonicalisation() {
     assert_eq!(fp.tools[0].param_names, vec!["city".to_string()]);
 }
 
-/// v0.5 R2 Analyst-W2: file-rename test — the renamed feed file is
-/// embedded via `include_str!` at compile time, so the test below
-/// triggers a compile error if the include path drifts.
+/// v0.5 R2 Analyst-W2 (v0.8 refreshed): file-provenance test — the feed
+/// file is embedded via `include_str!` at compile time, so this triggers
+/// a compile error if the include path drifts and a runtime error if the
+/// `generated` date stops tracking the last curation pass.
 #[test]
 fn r2_w2_cve_feed_filename_reflects_curation_provenance() {
-    // The file is `curated-2026-05-28.toml`. If anyone reverts the
-    // rename without updating `include_str!`, this comment lives at
-    // the integration boundary as documentation.
+    // v0.8 renamed the feed to `curated-2026-07-03.toml` (added the
+    // filesystem path-traversal defense-in-depth entry). If anyone
+    // reverts the rename without updating `include_str!`, this test and
+    // its sibling comment live at the integration boundary as
+    // documentation.
     use mcp_armor::cve::FEED;
     let f = FEED().expect("feed parses");
     assert_eq!(
-        f.generated, "2026-05-28",
-        "feed generated date should reflect the curated provenance, not the legacy OX-only timestamp"
+        f.generated, "2026-07-03",
+        "feed generated date should reflect the latest curated provenance, not a legacy timestamp"
     );
 }

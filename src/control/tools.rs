@@ -169,6 +169,24 @@ pub fn list() -> Value {
                     "readOnlyHint": true,
                     "destructiveHint": false
                 }
+            },
+            {
+                "name": "armor_scan_tools_list",
+                "description": "v0.8 Layer 8 — Scan a captured tools/list response for tool-description / full-schema poisoning (model-directed instructions hidden in tool descriptions, parameter schemas, enum values or defaults). Read-only; never spawns the upstream. Pass `tools_list` as the response object or a raw JSON string. Closes the first-sight Tool Poisoning (Invariant Labs) / Full-Schema Poisoning (CyberArk) / OWASP MCP03 class that Layer 7 drift (which only catches later changes) leaves open on the initial baseline.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tools_list": {
+                            "description": "The tools/list response, as a JSON object or a JSON string."
+                        }
+                    },
+                    "required": ["tools_list"],
+                    "additionalProperties": false
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "destructiveHint": false
+                }
             }
         ]
     })
@@ -179,13 +197,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_has_ten_entries_v05() {
+    fn list_has_eleven_entries_v08() {
         let v = list();
         let arr = v["tools"].as_array().expect("array");
         assert_eq!(
             arr.len(),
-            10,
-            "v0.5 expects 10 control-plane tools (6 v0.1 + 3 v0.2 + 1 v0.5 drift)"
+            11,
+            "v0.8 expects 11 control-plane tools (6 v0.1 + 3 v0.2 + 1 v0.5 drift + 1 v0.8 poison)"
         );
         let names: Vec<&str> = arr
             .iter()
@@ -202,6 +220,7 @@ mod tests {
             "armor_verify_bundle",
             "armor_rekor_lookup",
             "armor_get_drift_history",
+            "armor_scan_tools_list",
         ] {
             assert!(names.contains(&required), "missing tool: {required}");
         }

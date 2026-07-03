@@ -4,7 +4,8 @@
 //! Both share the same [`Scanner`], [`PolicyHandle`], and [`ScanHistory`]
 //! state via [`ArmorState`]; the rmcp control plane translates MCP `tools/call`
 //! requests into the existing [`crate::control::handle_request`] dispatcher
-//! so the 10-tool surface (6 v0.1 + 3 v0.2 + 1 v0.5 drift) stays a Single
+//! so the 11-tool surface (6 v0.1 + 3 v0.2 + 1 v0.5 drift + 1 v0.8 poison)
+//! stays a Single
 //! Source of Truth across both control planes.
 //!
 //! # Why two control planes (still)?
@@ -29,7 +30,7 @@
 //! so the CVE was never exploitable in mcp-armor, but the transitive dep
 //! bump means downstream `cargo audit` runs stop flagging us once the
 //! rustsec advisory-db propagates). v0.7 also wires `tools/call` through
-//! [`dispatch_via_handle_request`] (v0.2 advertised the 9 (now 10) tools
+//! [`dispatch_via_handle_request`] (v0.2 advertised the 9 (now 11) tools
 //! via `get_info()` but refused every call with a "v0.3 backlog" error;
 //! v0.7 routes calls through the same dispatcher the hand-rolled plane
 //! uses — both planes are behaviourally identical from the client's
@@ -37,7 +38,7 @@
 //! `#[tool_router]` plus `#[tool_handler]` macro pair (the macro path
 //! requires every tool to be a `#[tool]`-annotated function with a
 //! `Parameters<T>` derive plus a `schemars::JsonSchema` derive on the
-//! input type; our 10 tools share a hand-rolled JSON schema set in
+//! input type; our 11 tools share a hand-rolled JSON schema set in
 //! [`crate::control::tools::list`] that is also the SSOT for the
 //! hand-rolled JSON-RPC plane, and reusing that source via
 //! `serde_json::from_value::<rmcp::model::Tool>` keeps the dispatcher
@@ -107,7 +108,7 @@ impl ArmorState {
 }
 
 /// Dispatch a tool call by routing through the existing hand-rolled
-/// dispatcher. This is the SSOT for the 10-tool semantics — both control
+/// dispatcher. This is the SSOT for the 11-tool semantics — both control
 /// planes (hand-rolled + rmcp 1.5) call into this function so a fix in
 /// the dispatcher lands in both surfaces without further wiring.
 ///
@@ -223,11 +224,12 @@ impl ServerHandler for ArmorRmcpHandler {
             Implementation::new("mcp-armor-control".to_string(), crate::VERSION.to_string());
         info.instructions = Some(
             "mcp-armor read-only control plane (rmcp 1.5 variant). \
-             10 tools: armor_scan_payload, armor_verify_manifest, \
+             11 tools: armor_scan_payload, armor_verify_manifest, \
              armor_list_blocked, armor_get_policy, armor_check_cve, \
              armor_simulate_attack, armor_get_keystore, \
              armor_verify_bundle, armor_rekor_lookup, \
-             armor_get_drift_history. All read-only, all non-destructive. \
+             armor_get_drift_history, armor_scan_tools_list. \
+             All read-only, all non-destructive. \
              Identical semantics to the hand-rolled JSON-RPC plane \
              (`mcp-armor mcp-control`) — both planes share one dispatcher."
                 .to_string(),
@@ -347,18 +349,19 @@ mod tests {
         ArmorState::new(scanner, handle, history)
     }
 
-    /// v0.7 — the rmcp plane MUST surface the same 10 tools the
-    /// hand-rolled JSON plane advertises. `build_tools` round-trips
-    /// the hand-rolled JSON-Schema set through `serde_json::from_value`
-    /// — a non-zero count proves the rmcp `Tool` struct shape still
-    /// accepts our schema set across rmcp 1.5 patch releases.
+    /// The rmcp plane MUST surface the same tools the hand-rolled JSON
+    /// plane advertises. `build_tools` round-trips the hand-rolled
+    /// JSON-Schema set through `serde_json::from_value` — a non-zero count
+    /// proves the rmcp `Tool` struct shape still accepts our schema set
+    /// across rmcp 1.5 patch releases. v0.8 raised the surface to 11
+    /// (added `armor_scan_tools_list`).
     #[test]
-    fn build_tools_returns_ten_entries() {
+    fn build_tools_returns_eleven_entries() {
         let tools = build_tools();
         assert_eq!(
             tools.len(),
-            10,
-            "v0.7 rmcp plane expects 10 control-plane tools (same set as hand-rolled plane: 6 v0.1 + 3 v0.2 + 1 v0.5 drift)"
+            11,
+            "v0.8 rmcp plane expects 11 control-plane tools (6 v0.1 + 3 v0.2 + 1 v0.5 drift + 1 v0.8 poison)"
         );
     }
 

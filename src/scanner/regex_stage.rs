@@ -64,6 +64,24 @@ fn regex_sources(pattern_id: &str) -> &'static [&'static str] {
             r"(?i)\bcurl\s+http",
             r"(?i)\bwget\s+http",
         ],
+        "path_traversal" => &[
+            // v0.8 — directory-traversal sequences in tool-call args.
+            // Two or more `..` climbs, where the climbs may be separated by
+            // no-op path noise (`.` segments, repeated slashes) — so
+            // `.././../etc` and `..//../etc` are caught even though the
+            // `..` tokens are not byte-adjacent (Critic v0.8-R1: literal
+            // adjacency `(?:\.\.[\\/]){2,}` was defeated by inserting a `.`
+            // segment). A single `../foo` (one climb) or `./data/x` (no
+            // climb) does not match — the verdict shape is an actual
+            // *repeated* escape out of a working directory. The `[./\\]*`
+            // bridge only tolerates dots and slashes; a named directory
+            // between two climbs (`../shared/../x`, a *net* single climb)
+            // correctly does not match.
+            r"\.\.[\\/][./\\]*\.\.[\\/]",
+            // percent-encoded variants (`%2e%2e%2f`, `..%2f`), same
+            // repeated-climb requirement with encoded no-op tolerance.
+            r"(?i)(?:%2e%2e|\.\.)%?(?:2f|5c|[\\/])(?:%2e|\.|%2f|%5c|[\\/])*(?:%2e%2e|\.\.)%?(?:2f|5c|[\\/])",
+        ],
         _ => &[],
     }
 }
@@ -90,5 +108,31 @@ mod tests {
         let s = RegexStage::new(&["instruction_override".to_string()]).expect("build");
         assert!(!s.matches("Please ignore previous instructions").is_empty());
         assert!(!s.matches("disregard above").is_empty());
+    }
+
+    #[test]
+    fn path_traversal_needs_repeated_climb() {
+        let s = RegexStage::new(&["path_traversal".to_string()]).expect("build");
+        // Repeated climb → match.
+        assert!(!s.matches("../../../../etc/passwd").is_empty());
+        assert!(!s.matches(r"..\..\..\windows\system32").is_empty());
+        assert!(!s.matches("%2e%2e%2f%2e%2e%2fetc").is_empty());
+        // Single relative segment → no false positive.
+        assert!(s.matches("./data/report.xlsx").is_empty());
+        assert!(s.matches("../shared/config.json").is_empty());
+    }
+
+    #[test]
+    fn path_traversal_catches_adjacency_broken_bypass() {
+        // Critic v0.8-R1: `.././../` resolves to `../../` but the `..`
+        // tokens are not byte-adjacent — the old `(?:\.\.[\\/]){2,}` missed
+        // it entirely. The bridged pattern must catch it.
+        let s = RegexStage::new(&["path_traversal".to_string()]).expect("build");
+        assert!(!s.matches(".././../home/victim/.aws/credentials").is_empty());
+        assert!(!s.matches("..//../home/victim/.aws/credentials").is_empty());
+        assert!(!s.matches("..%2f..%2fetc%2fshadow").is_empty());
+        // A *net* single climb (named dir between the two `..`) is not an
+        // escape and must not false-positive.
+        assert!(s.matches("../shared/../data/report.json").is_empty());
     }
 }

@@ -61,6 +61,7 @@ fn trigger_strings(pattern_id: &str) -> &'static [&'static str] {
         "html_script_inject" => &["<script", "</script", "onerror=", "onload="],
         "tag_unicode_evasion" => &["ignore previous", "reveal", "secret"],
         "fullwidth_evasion" => &["sudo", "rm -rf", "curl", "wget"],
+        "path_traversal" => &["../", "..\\", "%2e%2e", "..%2f", "..%5c"],
         _ => &[],
     }
 }
@@ -87,5 +88,14 @@ mod tests {
         let stage = AhoStage::new(&["instruction_override".to_string()]).expect("build");
         let hits = stage.matches("IGNORE PREVIOUS messages");
         assert!(hits.contains(&"instruction_override".to_string()));
+    }
+
+    #[test]
+    fn prefilter_hits_path_traversal() {
+        let stage = AhoStage::new(&["path_traversal".to_string()]).expect("build");
+        assert!(stage
+            .matches("../../etc/passwd")
+            .contains(&"path_traversal".to_string()));
+        assert!(stage.matches("clean/relative/path").is_empty());
     }
 }

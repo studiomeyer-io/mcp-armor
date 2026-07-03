@@ -1,4 +1,4 @@
-//! CVE feed compiled at build time from `cve-feed/ox-advisory-2026-04-15.toml`.
+//! CVE feed compiled at build time from `cve-feed/curated-2026-07-03.toml`.
 //! Static feed — updates ship as new releases (R3 in PLAN.md).
 
 pub mod feed;

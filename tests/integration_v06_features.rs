@@ -557,11 +557,17 @@ fn meta_pin_version_matches_crate_version() {
     let baseline = fingerprint_with_opts("/bin/x", &v, FingerprintOpts::default()).expect("fp");
     let meta = fingerprint_meta_value(&baseline);
     let pin_version = meta["pin_version"].as_str().expect("pin_version");
+    // The pin version tracks CARGO_PKG_VERSION; assert it is a released
+    // 0.x line at or past the v0.6 baseline that introduced the meta pin.
+    let (major, minor) = {
+        let mut it = pin_version.split('.');
+        let maj: u32 = it.next().and_then(|s| s.parse().ok()).expect("major");
+        let min: u32 = it.next().and_then(|s| s.parse().ok()).expect("minor");
+        (maj, min)
+    };
     assert!(
-        pin_version.starts_with("0.6.")
-            || pin_version.starts_with("0.7.")
-            || pin_version.starts_with("0.6.0"),
-        "pin_version should follow the v0.6 line (got {pin_version})"
+        major == 0 && minor >= 6,
+        "pin_version should be on the 0.6+ line (got {pin_version})"
     );
 }
 
