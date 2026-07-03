@@ -127,9 +127,12 @@ before matching.
   no-default-features**, all green.
 - `cargo clippy --all-targets --all-features -- -D warnings` and
   `--no-default-features` clean; `cargo fmt --check` clean;
-  `cargo deny --all-features check` clean (bumped `anyhow` 1.0.102 →
-  1.0.103 to clear RUSTSEC `downcast_mut` UB advisory); release
-  `perf_gate` p99 under the 5 ms budget with the new pattern.
+  `cargo deny --all-features check` + `cargo audit` clean (bumped
+  `anyhow` 1.0.102 → 1.0.103 to clear the RUSTSEC `downcast_mut` UB
+  advisory, and `quinn-proto` 0.11.14 → 0.11.15 for RUSTSEC-2026-0185 — an
+  optional, never-compiled reqwest HTTP/3 transitive, patched rather than
+  suppressed); release `perf_gate` p99 under the 5 ms budget with the new
+  pattern.
 
 ### Review
 
