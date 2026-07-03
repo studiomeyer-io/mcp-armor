@@ -368,6 +368,15 @@ A small family of focused, production-grade tools for building and operating MCP
 
 Together: **armor** guards at runtime, **gauntlet** attacks before deploy, **covenant** watches your interface over time, **herald** gets you onto the new spec.
 
+## Authors
+
+Maintained by **Matthias Meyer** (StudioMeyer, Palma de Mallorca), built in
+a human-in-the-loop workflow with Anthropic's Claude models — **Claude Fable
+5** authored the v0.8 Layer 8 work, **Claude Opus 4.8** the v0.1–v0.7
+foundation. Every line ships behind a multi-round adversarial code review
+and the full CI gate. Full credits + the `Co-Authored-By` trail:
+[AUTHORS.md](AUTHORS.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright 2026 Matthias Meyer (StudioMeyer).

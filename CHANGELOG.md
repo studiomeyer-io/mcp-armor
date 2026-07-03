@@ -119,12 +119,12 @@ before matching.
 
 ### Tests + gates
 
-- +49 tests (26 `tool_poison` unit incl. false-positive, cross-field and
-  DoS-bound guards, 11 `run_poison_check` + `resolve_outbound_decision`
-  proxy-wiring unit, an end-to-end `path_traversal` scanner test,
-  `tests/integration_tool_poison_v08.rs`, `server_json_provenance`, plus
-  pattern/feed round-trip pins). **434 all-features / 428
-  no-default-features**, all green.
+- +52 tests (28 `tool_poison` unit incl. false-positive, cross-field,
+  output-schema and DoS-bound guards, 11 `run_poison_check` +
+  `resolve_outbound_decision` proxy-wiring unit, an end-to-end
+  `path_traversal` scanner test, `tests/integration_tool_poison_v08.rs`,
+  `server_json_provenance`, plus pattern/feed round-trip pins). **437
+  all-features / 431 no-default-features**, all green.
 - `cargo clippy --all-targets --all-features -- -D warnings` and
   `--no-default-features` clean; `cargo fmt --check` clean;
   `cargo deny --all-features check` + `cargo audit` clean (bumped
