@@ -4,6 +4,17 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **RUSTSEC-2026-0204** — bump `crossbeam-epoch` 0.9.18 → 0.9.20 in `Cargo.lock`.
+  Pulled in transitively as a **dev-dependency** via `criterion` (benchmarks),
+  so the published sidecar binary was never affected — but `cargo audit`,
+  `osv-scanner` and `cargo deny` flag any advisory present in the lockfile,
+  which kept CI red. Lockfile-only change, no release-artifact impact, no
+  version bump.
+
 ## [0.8.0] — 2026-07-03
 
 ### Layer 8 — Tool-Description / Full-Schema Poisoning detection
