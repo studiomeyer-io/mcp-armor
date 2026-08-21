@@ -1,0 +1,74 @@
+# OCI-Image fuer die Official MCP Registry (package type "oci").
+#
+# Eigener Workflow, weil das Image bisher NIE gebaut wurde: publish.yml baut
+# Binaries, GitHub-Release und crates.io, aber keinen Container. Dadurch zeigte
+# server.json seit v0.8.0 auf ghcr.io/...:0.8.0, das es nicht gab (gemessen
+# 21.08.2026: Tag 0.8.0 -> HTTP 404, nur 0.7.0 und latest lagen da).
+#
+# workflow_dispatch ist bewusst dabei, damit ein fehlendes Image fuer einen
+# bereits veroeffentlichten Tag nachgetragen werden kann, ohne den Tag neu zu
+# pushen (das wuerde das bestehende GitHub-Release neu schreiben).
+name: oci
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Vorhandenes Tag, fuer das das Image nachgetragen wird (z.B. v0.8.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  oci-publish:
+    name: oci image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: derive version
+        id: v
+        run: |
+          REF="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+      # Graceful-skip nach dem Muster von cargo-publish in publish.yml:
+      # ein bereits vorhandenes Image darf den Lauf nicht rot faerben.
+      - name: skip if tag already on ghcr
+        id: exists
+        run: |
+          TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository }}:pull&service=ghcr.io" | jq -r .token)
+          CODE=$(curl -sSL -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${{ github.repository }}/manifests/${{ steps.v.outputs.version }}")
+          if [ "$CODE" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::ghcr tag ${{ steps.v.outputs.version }} existiert bereits - Bau wird uebersprungen"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.already == 'false'
+      - uses: docker/login-action@v3
+        if: steps.exists.outputs.already == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push
+        if: steps.exists.outputs.already == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.v.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          provenance: true
+          sbom: true
