@@ -43,7 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # 0.31 reworked the metrics SDK in ways we don't consume and 0.32 changed
 # the OTLP feature-flag layout again; 0.30 is the LTS-shaped step.
 opentelemetry = { version = "0.30", default-features = false, features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.30", default-features = false, features = ["trace", "experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
 ed25519-dalek = { version = "2.1", features = ["pem", "rand_core"] }
 regex = "1.10"
