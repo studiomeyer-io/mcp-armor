@@ -4,14 +4,21 @@ on:
   push:
     tags: ['v*']
 
+# Least privilege: der Kopf liest nur. Schreibrechte stehen an dem EINEN
+# Job, der sie braucht — `contents: write` allein beim GitHub-Release,
+# `id-token: write` allein beim Bau mit cosign-OIDC. Vorher trug der Kopf
+# beide, damit auch der cargo-publish-Job, der nichts davon anfasst
+# (OpenSSF Scorecard TokenPermissionsID, Schweregrad high).
 permissions:
-  contents: write
-  id-token: write   # required for cosign keyless OIDC
+  contents: read
 
 jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write   # required for cosign keyless OIDC
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +66,8 @@ jobs:
     name: github release
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: write   # softprops/action-gh-release legt das Release an
     steps:
       - uses: actions/download-artifact@v8
         with:

@@ -9,6 +9,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Least privilege: jeder Job hier liest nur den Quelltext. Ohne diesen
+# Block erbt der Lauf die Standardrechte der Organisation, die schreibend
+# sein koennen (OpenSSF Scorecard TokenPermissionsID, Schweregrad high).
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.os }} / rust ${{ matrix.rust }})

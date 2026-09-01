@@ -20,14 +20,20 @@ on:
         required: true
         type: string
 
+# Least privilege: der Kopf liest nur; `packages: write` steht am Job, der
+# das Image schiebt (OpenSSF Scorecard TokenPermissionsID, Schweregrad
+# high). Fuer diesen Workflow gibt es nur einen Job, die Wirkung ist heute
+# also dieselbe — die Trennung traegt, sobald ein zweiter dazukommt.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   oci-publish:
     name: oci image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
         with:
