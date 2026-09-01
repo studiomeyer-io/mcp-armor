@@ -3,9 +3,21 @@
 //!
 //! CI runs this with `cargo bench --bench scanner` and a 7 ms hard cliff
 //! (5 ms target plus 2 ms drift slack).
+//!
+//! 2026-09-02 — `bench_fingerprint_20_tools` moved here out of
+//! tests/integration_drift_v05.rs. It lived there as a single
+//! `Instant::now()` around one un-warmed call asserting `< 5 ms`, and it
+//! failed on exactly one of four CI matrix legs (macos-latest / rust
+//! 1.89.0, measured 18 ms) while passing on the other three — blocking a
+//! dependency PR for ten days. One sample on a contended shared runner
+//! measures the runner. Criterion warms up and takes repeated samples,
+//! which is what a p99 envelope claim actually needs; the integration
+//! test kept the correctness half (all 20 tools survive the fingerprint).
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use mcp_armor::manifest::drift::fingerprint;
 use mcp_armor::Scanner;
+use serde_json::json;
 
 fn payload(n_bytes: usize) -> String {
     let chunk = "lorem ipsum dolor sit amet consectetur adipiscing elit ";
@@ -51,11 +63,34 @@ fn bench_match_100k(c: &mut Criterion) {
     });
 }
 
+/// Drift fingerprint over a 20-tool manifest — the same shape the
+/// integration test builds. Same 5 ms envelope as the scanner path.
+fn bench_fingerprint_20_tools(c: &mut Criterion) {
+    let tools: Vec<_> = (0..20)
+        .map(|i| {
+            json!({
+                "name": format!("tool_{i}"),
+                "description": format!("Description for tool {i} — does something useful."),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"arg_a": {"type": "string"}, "arg_b": {"type": "integer"}},
+                    "required": ["arg_a"]
+                }
+            })
+        })
+        .collect();
+    let v = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}});
+    c.bench_function("fingerprint_20_tools", |b| {
+        b.iter(|| fingerprint(black_box("/bin/large-server"), black_box(&v)));
+    });
+}
+
 criterion_group!(
     benches,
     bench_clean_1k,
     bench_match_1k,
     bench_match_10k,
-    bench_match_100k
+    bench_match_100k,
+    bench_fingerprint_20_tools
 );
 criterion_main!(benches);

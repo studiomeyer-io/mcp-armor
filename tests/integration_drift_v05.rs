@@ -352,12 +352,21 @@ fn default_policy_picks_up_warn_drift_mode() {
     assert_eq!(p.tools_list_drift_detection, DriftMode::Warn);
 }
 
-/// Wire-bench sanity: fingerprint of a 20-tool manifest stays well
-/// below the 5 ms p99 envelope budget. Smoke test only — full
-/// criterion bench lives in benches/.
+/// Wire sanity: fingerprint of a 20-tool manifest produces the expected
+/// shape. Smoke test only — the timing envelope lives in the criterion
+/// bench under benches/, which is where a wall-clock number belongs.
+///
+/// 2026-09-02: this test used to assert `elapsed < 5 ms` and blocked a
+/// dependency PR for ten days. It failed on exactly one of four matrix
+/// legs (macos-latest / rust 1.89.0, measured 18 ms) while the same
+/// commit passed on the other three. A wall-clock assertion on a shared,
+/// contended CI runner measures the runner, not the code — the p99
+/// envelope claim needs a warmed-up benchmark harness with repeated
+/// samples, which is precisely what criterion provides and a single
+/// `Instant::now()` does not. The correctness half of the test (the
+/// fingerprint covers all 20 tools) is real and stays.
 #[test]
-fn fingerprint_20_tools_under_envelope_budget() {
-    use std::time::Instant;
+fn fingerprint_20_tools_produces_full_shape() {
     let mut tools = Vec::new();
     for i in 0..20 {
         tools.push(json!({
@@ -371,15 +380,17 @@ fn fingerprint_20_tools_under_envelope_budget() {
         }));
     }
     let v = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}});
-    let t0 = Instant::now();
     let fp = fingerprint("/bin/large-server", &v).expect("fp");
-    let dt = t0.elapsed();
     assert_eq!(fp.tools.len(), 20);
-    assert!(
-        dt.as_millis() < 5,
-        "fingerprint took {}ms — exceeded 5ms envelope budget",
-        dt.as_millis()
-    );
+    // Every tool must be present by name — a fingerprint that silently
+    // drops entries would still have length 20 if it duplicated one.
+    for i in 0..20 {
+        let want = format!("tool_{i}");
+        assert!(
+            fp.tools.iter().any(|t| t.name == want),
+            "fingerprint lost tool {want}"
+        );
+    }
 }
 
 /// Concurrent persist_locked from two threads must serialise — no
