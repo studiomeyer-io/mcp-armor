@@ -39,12 +39,31 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # BatchSpanProcessor/PeriodicReader to run on a dedicated background
 # thread instead of relying on a tokio runtime — that change alone fixes
 # the historical shutdown deadlock without behavioural surprises in
-# fmt-only default builds. We hold at 0.30 rather than chase 0.32 because
-# 0.31 reworked the metrics SDK in ways we don't consume and 0.32 changed
-# the OTLP feature-flag layout again; 0.30 is the LTS-shaped step.
-opentelemetry = { version = "0.30", default-features = false, features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.30", default-features = false, features = ["trace", "experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.30", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
+# fmt-only default builds.
+#
+# 0.30 → 0.32 (2026-09-02). The previous note here argued for holding at
+# 0.30 as "the LTS-shaped step", on the grounds that 0.31 reworked the
+# metrics SDK we don't consume and 0.32 changed the OTLP feature-flag
+# layout again. GHSA-w9wp-h8wv-79jx removed that option: opentelemetry_sdk
+# <= 0.32.0 parses inbound W3C `baggage` headers before applying the
+# 64-member / 8192-byte limits, and the fix landed ONLY in 0.32.1 — there
+# is no 0.30.x backport, so holding meant shipping a lockfile with a known
+# advisory in a supply-chain security tool.
+#
+# The feature-flag worry did not materialise: the same three flags
+# (`trace`, `experimental_trace_batch_span_processor_with_async_runtime`,
+# `rt-tokio`, `grpc-tonic`) resolve unchanged on 0.32, and src/otel needed
+# ZERO source changes. Measured, not assumed: mutation probe in
+# exporter.rs fails the build under `--features otlp` and passes without
+# it, so the module is genuinely covered by the otlp build.
+#
+# The three crates MUST move together. Dependabot's PR #25 bumped
+# opentelemetry_sdk alone and produced four trait-bound errors
+# (SpanExporter, BatchSpanProcessorBuilder, TracerProvider, KeyValue) —
+# the same bump with the whole family compiles clean.
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
 ed25519-dalek = { version = "2.1", features = ["pem", "rand_core"] }
 regex = "1.10"
 aho-corasick = "1.1"
