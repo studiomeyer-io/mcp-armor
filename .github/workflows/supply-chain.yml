@@ -92,7 +92,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: stable
-      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
       - name: scan SBOM
         # `--recursive` would walk a tree; we already have a generated
         # SBOM so we point at it directly. SARIF output gets uploaded

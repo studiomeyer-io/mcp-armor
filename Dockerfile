@@ -11,12 +11,12 @@
 #
 # Reproducible: builds from source against the committed Cargo.lock.
 
-FROM rust:bookworm AS builder
+FROM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release --locked --bin mcp-armor
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 # Ownership annotation for the Official MCP Registry — must match server.json "name".
 LABEL io.modelcontextprotocol.server.name="io.studiomeyer/armor"
 LABEL org.opencontainers.image.title="mcp-armor" \
