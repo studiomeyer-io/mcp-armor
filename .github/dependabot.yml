@@ -43,3 +43,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Digest-Updates innerhalb von rust:bookworm und distroless:nonroot sind
+      # erwuenscht, ein Wechsel der Distribution oder Hauptversion nicht.
+      - dependency-name: "rust"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "gcr.io/distroless/cc-debian12"
+        update-types: ["version-update:semver-major"]
