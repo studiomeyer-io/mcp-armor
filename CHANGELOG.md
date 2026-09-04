@@ -6,7 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Packaging
+
+- **The OCI image for 0.8.0 exists now**, and the registry entry points at it.
+  `server.json` had advertised `ghcr.io/studiomeyer-io/mcp-armor:0.8.0` since
+  the release while only `0.7.0` and `latest` were on ghcr, so the Official MCP
+  Registry entry stayed on 0.7.0 rather than pointing at a 404.
+
+  The `oci` workflow still cannot push: a package created by hand through a PAT
+  has no link to Actions, `GITHUB_TOKEN` gets `denied: permission_denied:
+  write_package`, and there is no REST API for that link. The image was
+  therefore built from the `v0.8.0` tag and pushed with a personal token that
+  carries `write:packages`, the same route 0.7.0 took. Before pushing,
+  `--version` reported `mcp-armor 0.8.0` and an MCP handshake answered with the
+  same version; afterwards the tag is anonymously pullable. Re-running the
+  workflow now passes through its own graceful skip.
+
 ### Security
+
+- **`sigstore/cosign-installer` raised v3 to v4.1.2.** v4 installs Cosign 3.0.6
+  instead of 2.5.2, where `sign-blob` requires the `--bundle` flag; our call in
+  `publish.yml` already passes it, checked before taking the bump. The workflow
+  only runs on version tags, so a break would have surfaced in the middle of a
+  release.
+- **Base images pinned by digest** (`rust:bookworm`,
+  `gcr.io/distroless/cc-debian12:nonroot`), each verified against its registry
+  before being written down, and `dependabot.yml` now covers the `docker`
+  ecosystem so a digest does not silently go stale. Major bumps of the base
+  distribution are ignored there.
+- **`dtolnay/rust-toolchain` excluded from automatic bumps.** For that action
+  the ref names the Rust toolchain, not the action version. A proposed bump
+  swapped the `stable` hash for the `master` one and left the `# stable`
+  comment in place, which would have made the line say something other than
+  what it does. The four other Rust repositories in this organisation have
+  carried that rule for a while; this one did not.
+
 
 - **RUSTSEC-2026-0204** — bump `crossbeam-epoch` 0.9.18 → 0.9.20 in `Cargo.lock`.
   Pulled in transitively as a **dev-dependency** via `criterion` (benchmarks),
