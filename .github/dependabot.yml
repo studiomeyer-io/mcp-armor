@@ -39,6 +39,12 @@ updates:
       actions:
         patterns:
           - "*"
+    ignore:
+      # Bei dieser Action benennt der Ref die Rust-Toolchain, nicht die
+      # Version der Action. Ein automatischer Bump tauscht den Hash gegen den
+      # des master-Zweigs aus und laesst den Kommentar "# stable" stehen: der
+      # Eintrag wuerde dann etwas anderes sagen als er tut. Von Hand pflegen.
+      - dependency-name: "dtolnay/rust-toolchain"
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
