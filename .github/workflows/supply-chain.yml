@@ -29,11 +29,13 @@ jobs:
     name: cyclonedx-sbom
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: install cargo-cyclonedx
         run: cargo install --locked cargo-cyclonedx
       - name: generate SBOM (JSON)
@@ -60,7 +62,7 @@ jobs:
       - name: list generated SBOMs
         run: ls -la bom.json
       - name: upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cyclonedx-sbom
           path: bom.json
@@ -77,17 +79,17 @@ jobs:
       contents: read
       security-events: write   # Upload SARIF to Security tab
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: cyclonedx-sbom
           path: ./sbom
       - name: list pulled SBOMs
         run: ls -la sbom/
       - name: install osv-scanner
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: stable
       - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2
@@ -101,7 +103,7 @@ jobs:
           osv-scanner --sbom=sbom/bom.json --format table
       - name: upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v4.37.9
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: osv-results.sarif
           category: osv-scanner
@@ -115,10 +117,10 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           # Run all four checks; `deny.toml` in the repo root configures
           # license allowlist + advisory severity thresholds + ban list.
