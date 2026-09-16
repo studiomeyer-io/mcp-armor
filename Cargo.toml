@@ -137,7 +137,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # reduction is therefore the proc-macro machinery (`darling`,
 # `serde_derive_internals`, `rmcp-macros` itself) — non-trivial, just
 # not the `schemars` removal the R1 comment originally implied.
-rmcp = { version = "1.5", default-features = false, features = ["server", "transport-io"], optional = true }
+rmcp = { version = "2.0", default-features = false, features = ["server", "transport-io"], optional = true }
 # v0.6 — RFC 8785 JSON Canonicalization Scheme (JCS) for tools/list
 # fingerprinting. When the `jcs-canonical` feature is on the drift
 # pipeline canonicalises the per-tool JSON sub-tree per RFC 8785 (sorted
