@@ -7,11 +7,11 @@
     "url": "https://github.com/studiomeyer-io/mcp-armor",
     "source": "github"
   },
-  "version": "0.8.0",
+  "version": "0.8.1",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/studiomeyer-io/mcp-armor:0.8.0",
+      "identifier": "ghcr.io/studiomeyer-io/mcp-armor:0.8.1",
       "transport": {
         "type": "stdio"
       }

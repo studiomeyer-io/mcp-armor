@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-21
+
 ### Packaging
 
 - **The OCI image for 0.8.0 exists now**, and the registry entry points at it.
@@ -23,6 +25,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   workflow now passes through its own graceful skip.
 
 ### Security
+
+- **`rmcp` 1.8.0 → 2.1.0** (GHSA-33f5-2c5q-wgwj and GHSA-9pj6-vhgr-3mwh,
+  high; GHSA-9g45-5xwm-f3wc, medium). The affected code paths (OAuth resource
+  metadata discovery, the Streamable HTTP server transport, custom headers on
+  HTTP redirects) are not compiled into mcp-armor, which enables only the
+  `server` and `transport-io` features of `rmcp`, and only behind
+  `rmcp-control`. The bump keeps the dependency current and the advisory
+  scanners quiet. The one API change that reached us: `rmcp::model::Content`
+  is `ContentBlock` in 2.x. Verified with every feature combination of the
+  CI, MSRV 1.89, and a real stdio handshake over rmcp 2.1 (11 tools,
+  `tools/call` with `structuredContent`).
+- **`rustls` 0.23.40 → 0.23.45** (RUSTSEC-2026-0285: TLS 1.3 handshake
+  messages were accepted across encryption-level boundaries). Reached through
+  the OTLP exporter and the Sigstore/Rekor HTTP client. At release time the
+  advisory is in RustSec only, not in GitHub's database, so Dependabot stayed
+  silent while `cargo-deny` failed on `main`.
 
 - **`sigstore/cosign-installer` raised v3 to v4.1.2.** v4 installs Cosign 3.0.6
   instead of 2.5.2, where `sign-blob` requires the `--bundle` flag; our call in
