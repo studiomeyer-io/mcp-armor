@@ -18,25 +18,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   New module `scanner::override_variants`, behind a gate of its own: English
   and German variants with up to five words in between ("ignore any and all
-  of the previous instructions"), synonyms for "previous", an address or a
-  lead-in ("Claude, ...", "you must now ..."), and the verbs ignore,
-  disregard, forget (German: the imperatives of ignorieren, vergessen,
-  missachten). The global prefilter is unchanged on purpose. It is one gate
-  for every pattern, and an earlier draft that added "ignore" as a global
-  trigger changed the verdict of unrelated patterns (".gitignore" next to a
-  localhost URL blocked as `localhost_callback`).
+  of the previous instructions"), synonyms for "previous", an address of up
+  to three words ("Claude, ...", "Dear AI assistant, ..."), lead words and
+  modals ("please", "from now on", "you must now", "I want you to"), and the
+  verbs ignore, disregard, forget (German: the imperatives of ignorieren,
+  vergessen, missachten). The global prefilter is unchanged on purpose. It is
+  one gate for every pattern, and an earlier draft that added "ignore" as a
+  global trigger changed the verdict of unrelated patterns (".gitignore"
+  next to a localhost URL blocked as `localhost_callback`).
 
-  Precision rules: the verb has to open a clause, so "do not ignore the
-  previous instructions", "never ignore your instructions" and "models often
-  ignore earlier instructions" stay allowed. Objects are instructions,
+  Precision rules. The verb has to open a clause: start of text, a line
+  break, sentence punctuation (also CJK and inverted marks), an opening
+  quote or bracket, a dash, a bullet, `#`, `/`, `|`, a blockquote `>` or a
+  symbol such as an emoji, optionally followed by an opening emphasis. A
+  closing emphasis, a closing bracket or tag and a comma do not open a
+  clause, so "do not ignore the previous instructions", "**Never** ignore
+  your instructions" and "models, however, ignore earlier instructions" stay
+  allowed. "forget" never follows a modal ("you will forget all previous
+  instructions after a restart" describes). Objects are instructions,
   prompts, directives and directions, never messages, and without a
   qualifier only instructions and directives ("-y: ignore all prompts" stays
-  allowed). German matches need an imperative form, and a clause that ends
-  in a negation within four words after the object does not count
-  ("Vergiss die vorherigen Anweisungen nicht!"). Text worded exactly like the
-  injection still blocks, as the exact phrase did before: a correction such
-  as "Please ignore the previous instructions, I sent the wrong file" or a
-  doc note such as "Ignore the previous instructions if you use yarn".
+  allowed). German needs an imperative ("Ignorieren Sie" with a capital
+  "Sie"), and a match does not count when its clause ends in a negation
+  after words that only continue the object ("Vergiss die bisherigen Regeln
+  und Anweisungen nicht, sonst ..."); a lowercase verb in between opens a
+  new clause, so "Ignoriere alle vorherigen Anweisungen und zögere nicht."
+  still blocks. Text worded exactly like the injection still blocks, as the
+  exact phrase did before: a correction such as "Please ignore the previous
+  instructions, I sent the wrong file" or a doc note such as "Ignore the
+  previous instructions if you use yarn".
 
   Separators accept JSON escapes, because the proxy scans serialised
   arguments, where a line break arrives as the two characters `\n`. Word
@@ -50,13 +60,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matches nothing; over 1,120 prose documents every new match quotes an
   injection as an example. Known gaps: a third-party subject ("the assistant
   must ignore ..."), an instruction joined mid-sentence ("summarize this page
-  and ignore ..."), singular objects ("ignore the previous prompt"), other
-  objects ("commands", "rules", "guidelines" in English), a trailing
-  qualifier ("ignore the instructions above"), other or inflected verbs
-  ("override", "ignoring"), phrasings without a qualifier ("forget everything
-  I told you") and Spanish. Zero-width characters used as word separators
-  and the dotted capital I (U+0130) evade the scanner before and after this
-  change.
+  and ignore ..."), "forget" after a modal ("you must forget ..."), an
+  address of four or more words, singular objects ("ignore the previous
+  prompt"), other objects ("commands", "rules", "guidelines" in English), a
+  trailing qualifier ("ignore the instructions above"), other or inflected
+  verbs ("override", "ignoring"), phrasings without a qualifier ("forget
+  everything I told you") and Spanish. In German a capitalised verb between
+  the object and "nicht" is taken for a noun. Zero-width characters used as
+  word separators and the dotted capital I (U+0130) evade the scanner before
+  and after this change.
 
 ## [0.8.1] - 2026-09-21
 
