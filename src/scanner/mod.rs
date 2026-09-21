@@ -10,6 +10,7 @@
 
 pub mod aho;
 pub mod confusable;
+pub mod override_variants;
 pub mod regex_stage;
 pub mod tool_poison;
 pub mod unicode;
@@ -40,6 +41,9 @@ pub struct ScanResult {
 pub struct Scanner {
     aho: aho::AhoStage,
     regex: regex_stage::RegexStage,
+    /// `instruction_override` variants behind their own gate (see
+    /// [`override_variants`]); `None` when the feed has no such pattern.
+    variants: Option<override_variants::OverrideVariants>,
     pattern_to_cves: Vec<(String, Vec<String>)>,
 }
 
@@ -58,6 +62,14 @@ impl Scanner {
 
         let aho = aho::AhoStage::new(&pattern_ids)?;
         let regex = regex_stage::RegexStage::new(&pattern_ids)?;
+        let variants = if pattern_ids
+            .iter()
+            .any(|p| p == override_variants::PATTERN_ID)
+        {
+            Some(override_variants::OverrideVariants::new()?)
+        } else {
+            None
+        };
 
         // Build pattern_id -> [cve_ids] mapping for verdict enrichment.
         let mut map: Vec<(String, Vec<String>)> = pattern_ids
@@ -77,6 +89,7 @@ impl Scanner {
         Ok(Self {
             aho,
             regex,
+            variants,
             pattern_to_cves: map,
         })
     }
@@ -151,6 +164,7 @@ impl Scanner {
         } else {
             Vec::new()
         };
+        self.add_variant_hit(payload, &mut hits);
 
         // Stage 3: NFKC + zero-width strip + tag-unicode strip, re-scan —
         // gated on `scan_unicode` so policy.scan_unicode = false is honoured.
@@ -169,6 +183,7 @@ impl Scanner {
                         }
                     }
                 }
+                self.add_variant_hit(&n, &mut hits);
                 Some(n)
             }
         } else {
@@ -194,6 +209,7 @@ impl Scanner {
                             }
                         }
                     }
+                    self.add_variant_hit(&skel, &mut hits);
                 }
             }
         }
@@ -226,6 +242,17 @@ impl Scanner {
     /// the constant-factor improvement is marginal in absolute terms,
     /// but the change costs nothing and makes the asymptotic shape
     /// match the maintained invariant.
+    /// Adds `instruction_override` when the variant regexes match. They sit
+    /// behind their own gate, so they never open the prefilter for the other
+    /// patterns (see [`override_variants`]).
+    fn add_variant_hit(&self, haystack: &str, hits: &mut Vec<String>) {
+        if let Some(v) = &self.variants {
+            if !hits.iter().any(|h| h == override_variants::PATTERN_ID) && v.is_match(haystack) {
+                hits.push(override_variants::PATTERN_ID.to_string());
+            }
+        }
+    }
+
     fn collect_cves(&self, patterns: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for p in patterns {

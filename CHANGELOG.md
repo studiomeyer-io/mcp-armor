@@ -12,24 +12,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Up to 0.8.1 the payload scanner blocked "ignore previous instructions" and
   nothing around it: "ignore all previous instructions", "ignore all prior
   instructions" or "please disregard all previous instructions" came back as
-  `allow` with zero matched patterns. Two causes: the Aho-Corasick prefilter
-  knew fixed phrases only, so the regex stage never ran for these payloads,
-  and the regex allowed no word between the verb and the qualifier. The
-  prefilter now triggers on the verbs (ignore, disregard, forget; German
-  ignorier-, vergiss, missacht-), and three new `instruction_override`
-  patterns cover up to three words in between, synonyms for "previous", and a
-  narrow German form. Objects stay plural and "my" is not a filler, so a human
-  correction such as "please ignore my previous message" in a fetched mail
-  does not block. Side effect: `disregard above`, already in the regex, is
-  reachable now (its only trigger was "disregard the above").
+  `allow` with zero matched patterns. The Aho-Corasick prefilter knew fixed
+  phrases only, so the regex stage never ran for these payloads, and the
+  regex allowed no word between the verb and the qualifier.
 
-  Measured with the real `Scanner` over 5,159 technical documents (npm
-  READMEs, crate docs; 237,850 paragraphs): 0 `instruction_override` matches
-  before and after. Over 1,120 prose documents the new matches were texts
-  that quote the injection as an example, the same class the exact phrase
-  already matched. Still not covered: phrasings without a qualifier ("forget
-  everything I told you"), Spanish, and punctuation or underscores between
-  the words.
+  New module `scanner::override_variants`, behind a gate of its own: English
+  and German variants with up to five words in between ("ignore any and all
+  of the previous instructions"), synonyms for "previous", "all" or "your"
+  before the object, and the verbs ignore, disregard, forget (German
+  ignorieren, vergessen, missachten). The global prefilter is unchanged on
+  purpose. It is one gate for every pattern, and an earlier draft that added
+  "ignore" as a global trigger changed the verdict of unrelated patterns
+  (".gitignore" next to a localhost URL blocked as `localhost_callback`).
+
+  Precision rules: the verb has to open a clause, so "do not ignore the
+  previous instructions", "never ignore your instructions" and "models often
+  ignore earlier instructions" stay allowed; objects are instructions,
+  prompts, directives and directions, not messages, so a human correction in
+  a fetched mail does not block; a German object must not be followed by a
+  negation ("Vergiss die vorherigen Anweisungen nicht!"). Separators accept
+  JSON escapes, because the proxy scans serialised arguments, where a line
+  break arrives as the two characters `\n`.
+
+  Measured with the real `Scanner`: over 5,159 technical documents (npm
+  READMEs and crate docs, 237,850 paragraphs) the number of blocked
+  paragraphs across all patterns is unchanged and `instruction_override`
+  matches nothing; over 1,120 prose documents every new match quotes an
+  injection as an example. Known gaps: phrasings without a qualifier ("forget
+  everything I told you"), a trailing qualifier ("ignore the instructions
+  above"), other or inflected verbs ("override", "ignoring"), Spanish, and
+  zero-width characters used as word separators (normalisation strips them
+  and glues the words together; this predates the change).
 
 ## [0.8.1] - 2026-09-21
 

@@ -51,19 +51,10 @@ fn trigger_strings(pattern_id: &str) -> &'static [&'static str] {
         "auto_invoke_privileged" => &["auto_invoke", "/etc/passwd", "/etc/shadow", "id_rsa"],
         "javascript_uri" => &["javascript:", "data:text/html"],
         "instruction_override" => &[
-            // Single verbs, not phrases: the regex stage allows words
-            // between the verb and "previous instructions" ("ignore ALL
-            // previous ..."), and a phrase trigger such as "ignore previous"
-            // never fires for those, so the regex behind it never ran.
-            // Matching is ASCII case-insensitive (see `AhoStage::new`).
-            "ignore",
-            "disregard",
-            "forget",
+            "ignore previous",
+            "ignore prior",
+            "disregard the above",
             "system prompt",
-            // German: ignoriere/ignoriert, vergiss, missachte.
-            "ignorier",
-            "vergiss",
-            "missacht",
         ],
         "tag_injection" => &["</tool_result>", "</system>", "<system>", "</user>"],
         "zero_width_obfuscation" => &["ignore previous", "ignore prior"],
