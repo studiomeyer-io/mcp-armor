@@ -81,8 +81,6 @@ fn payload(n_bytes: usize, with_triggers: bool) -> String {
     s
 }
 
-/// Nearest-rank percentile over a slice of nanosecond samples. Sorts in
-/// place. `p` is in `[0.0, 1.0]`.
 /// Non-ASCII text that opens the `instruction_override` variant gate
 /// ("vergessen", "forget") without matching. A Unicode `\b` in those
 /// regexes once pushed this case to 11 to 22 ms p99: the regex crate leaves
@@ -100,6 +98,8 @@ fn variant_gate_payload(n_bytes: usize, sentence: &str) -> String {
     s
 }
 
+/// Nearest-rank percentile over a slice of nanosecond samples. Sorts in
+/// place. `p` is in `[0.0, 1.0]`.
 fn percentile_ns(samples: &mut [u128], p: f64) -> u128 {
     assert!(!samples.is_empty(), "no samples");
     samples.sort_unstable();
@@ -186,6 +186,15 @@ fn scanner_p99_under_budget() {
             variant_gate_payload(
                 100 * 1024,
                 "Don\u{2019}t forget to save the file before you close the editor. ",
+            ),
+            iters / 5,
+        ),
+        // Every opening tag is a clause opener for the variants.
+        (
+            "variant_html_100k",
+            variant_gate_payload(
+                100 * 1024,
+                "<li><a href=\"/docs/setup\">Don\u{2019}t forget</a> to <b>save</b> the file.</li> ",
             ),
             iters / 5,
         ),

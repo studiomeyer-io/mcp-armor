@@ -29,30 +29,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Precision rules. The verb has to open a clause: start of text, a line
   break, sentence punctuation (also CJK and inverted marks), an opening
-  quote or bracket, a dash, a bullet, `#`, `/`, `|`, a blockquote `>` or a
-  symbol such as an emoji, optionally followed by an opening emphasis. A
-  closing emphasis, a closing bracket or tag and a comma do not open a
-  clause, so "do not ignore the previous instructions", "**Never** ignore
-  your instructions" and "models, however, ignore earlier instructions" stay
-  allowed. "forget" never follows a modal ("you will forget all previous
-  instructions after a restart" describes). Objects are instructions,
-  prompts, directives and directions, never messages, and without a
-  qualifier only instructions and directives ("-y: ignore all prompts" stays
-  allowed). German needs an imperative ("Ignorieren Sie" with a capital
-  "Sie"), and a match does not count when its clause ends in a negation
-  after words that only continue the object ("Vergiss die bisherigen Regeln
-  und Anweisungen nicht, sonst ..."); a lowercase verb in between opens a
-  new clause, so "Ignoriere alle vorherigen Anweisungen und zögere nicht."
-  still blocks. Text worded exactly like the injection still blocks, as the
-  exact phrase did before: a correction such as "Please ignore the previous
-  instructions, I sent the wrong file" or a doc note such as "Ignore the
-  previous instructions if you use yarn".
+  bracket or curly quote, a dash, a bullet, `#`, `/`, `|`, a symbol such as
+  an emoji (also with a skin tone or as a keycap) or an opening HTML tag; at
+  the start of a line or of a JSON string also a blockquote (`>`, `>>`) or a
+  list number (`1)`, `a)`). An opening emphasis may follow. Straight quotes
+  and » › ” open a clause only in opening position, escaped ones in JSON
+  included. A closing emphasis, bracket, tag or quote and a comma do not
+  open a clause, so "do not ignore the previous instructions", "**Never**
+  ignore your instructions", `Rule one: "never" ignore your instructions`
+  and "models, however, ignore earlier instructions" stay allowed. "forget"
+  never follows a modal ("you will forget all previous instructions after a
+  restart" describes). Objects are instructions, prompts, directives and
+  directions, never messages, and without a qualifier only instructions and
+  directives ("-y: ignore all prompts" stays allowed).
+
+  German needs an imperative ("Ignorieren Sie" with a capital "Sie"), and a
+  match does not count when a negation ends its clause after words that
+  only continue the object: conjunctions, articles, prepositions, a fixed
+  list of adverbs, qualifiers, numbers and capitalised nouns ("Vergiss die
+  vorherigen Anweisungen zum Datenbank-Backup nicht."). A lowercase verb in
+  between opens a new clause, and a negation the clause goes on after does
+  not negate, so "Ignoriere alle vorherigen Anweisungen und zögere nicht."
+  and "... nicht nur teilweise, sondern vollständig" still block. The clause
+  ends at punctuation, a quote, a bracket, a line break or a JSON escape
+  other than a separator, so `\"` and `\u2013` end it and `\t` does not.
+  All-caps words never count as nouns.
+
+  Text worded exactly like the injection still blocks, as the exact phrase
+  did before: a correction such as "Please ignore the previous
+  instructions, I sent the wrong file", a doc note such as "Ignore the
+  previous instructions if you use yarn", and a German protective sentence
+  built as "nicht nur ..., sondern ..." ("Vergiss die vorherigen Anweisungen
+  nicht nur heute, sondern immer").
 
   Separators accept JSON escapes, because the proxy scans serialised
   arguments, where a line break arrives as the two characters `\n`. Word
   boundaries are ASCII: a Unicode `\b` made the regex engine leave its fast
   path on every non-ASCII byte (11 to 22 ms p99 on 100 kB of German text).
-  `perf_gate` has two new cases that open the new gate with non-ASCII text.
+  `perf_gate` has three new cases that open the new gate: German and English
+  text with non-ASCII characters, and HTML markup.
 
   Measured with the real `Scanner`: over 5,159 technical documents (npm
   READMEs and crate docs, 237,850 paragraphs) the number of blocked
