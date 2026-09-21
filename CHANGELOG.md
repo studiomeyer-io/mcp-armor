@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Instruction-override detection reached one exact word sequence only.**
+  Up to 0.8.1 the payload scanner blocked "ignore previous instructions" and
+  nothing around it: "ignore all previous instructions", "ignore all prior
+  instructions" or "please disregard all previous instructions" came back as
+  `allow` with zero matched patterns. Two causes: the Aho-Corasick prefilter
+  knew fixed phrases only, so the regex stage never ran for these payloads,
+  and the regex allowed no word between the verb and the qualifier. The
+  prefilter now triggers on the verbs (ignore, disregard, forget; German
+  ignorier-, vergiss, missacht-), and three new `instruction_override`
+  patterns cover up to three words in between, synonyms for "previous", and a
+  narrow German form. Objects stay plural and "my" is not a filler, so a human
+  correction such as "please ignore my previous message" in a fetched mail
+  does not block. Side effect: `disregard above`, already in the regex, is
+  reachable now (its only trigger was "disregard the above").
+
+  Measured with the real `Scanner` over 5,159 technical documents (npm
+  READMEs, crate docs; 237,850 paragraphs): 0 `instruction_override` matches
+  before and after. Over 1,120 prose documents the new matches were texts
+  that quote the injection as an example, the same class the exact phrase
+  already matched. Still not covered: phrasings without a qualifier ("forget
+  everything I told you"), Spanish, and punctuation or underscores between
+  the words.
+
 ## [0.8.1] - 2026-09-21
 
 ### Packaging
