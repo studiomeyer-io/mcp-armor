@@ -81,6 +81,23 @@ fn payload(n_bytes: usize, with_triggers: bool) -> String {
     s
 }
 
+/// Non-ASCII text that opens the `instruction_override` variant gate
+/// ("vergessen", "forget") without matching. A Unicode `\b` in those
+/// regexes once pushed this case to 11 to 22 ms p99: the regex crate leaves
+/// its lazy DFA on every non-ASCII byte. Cut on a char boundary.
+fn variant_gate_payload(n_bytes: usize, sentence: &str) -> String {
+    let mut s = String::with_capacity(n_bytes + sentence.len());
+    while s.len() < n_bytes {
+        s.push_str(sentence);
+    }
+    let mut cut = n_bytes.min(s.len());
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+    s
+}
+
 /// Nearest-rank percentile over a slice of nanosecond samples. Sorts in
 /// place. `p` is in `[0.0, 1.0]`.
 fn percentile_ns(samples: &mut [u128], p: f64) -> u128 {
@@ -156,6 +173,31 @@ fn scanner_p99_under_budget() {
         // still giving a stable tail estimate.
         ("match_100k", payload(100 * 1024, true), iters / 5),
         ("cyrillic_2k", cyrillic, iters),
+        (
+            "variant_de_100k",
+            variant_gate_payload(
+                100 * 1024,
+                "Größere Änderungen übernimmt das Team. Passwort vergessen? Dann hilft der Support. ",
+            ),
+            iters / 5,
+        ),
+        (
+            "variant_en_100k",
+            variant_gate_payload(
+                100 * 1024,
+                "Don\u{2019}t forget to save the file before you close the editor. ",
+            ),
+            iters / 5,
+        ),
+        // Every opening tag is a clause opener for the variants.
+        (
+            "variant_html_100k",
+            variant_gate_payload(
+                100 * 1024,
+                "<li><a href=\"/docs/setup\">Don\u{2019}t forget</a> to <b>save</b> the file.</li> ",
+            ),
+            iters / 5,
+        ),
     ];
 
     println!(

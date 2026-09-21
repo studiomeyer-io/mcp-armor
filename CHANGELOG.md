@@ -6,6 +6,85 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Instruction-override detection reached one exact word sequence only.**
+  Up to 0.8.1 the payload scanner blocked "ignore previous instructions" and
+  nothing around it: "ignore all previous instructions", "ignore all prior
+  instructions" or "please disregard all previous instructions" came back as
+  `allow` with zero matched patterns. The Aho-Corasick prefilter knew fixed
+  phrases only, so the regex stage never ran for these payloads, and the
+  regex allowed no word between the verb and the qualifier.
+
+  New module `scanner::override_variants`, behind a gate of its own: English
+  and German variants with up to five words in between ("ignore any and all
+  of the previous instructions"), synonyms for "previous", an address of up
+  to three words ("Claude, ...", "Dear AI assistant, ..."), lead words and
+  modals ("please", "from now on", "you must now", "I want you to"), and the
+  verbs ignore, disregard, forget (German: the imperatives of ignorieren,
+  vergessen, missachten). The global prefilter is unchanged on purpose. It is
+  one gate for every pattern, and an earlier draft that added "ignore" as a
+  global trigger changed the verdict of unrelated patterns (".gitignore"
+  next to a localhost URL blocked as `localhost_callback`).
+
+  Precision rules. The verb has to open a clause: start of text, a line
+  break, sentence punctuation (also CJK and inverted marks), an opening
+  bracket or curly quote, a dash, a bullet, `#`, `/`, `|`, a symbol such as
+  an emoji (also with a skin tone or as a keycap) or an opening HTML tag; at
+  the start of a line or of a JSON string also a blockquote (`>`, `>>`) or a
+  list number (`1)`, `a)`). An opening emphasis may follow. Straight quotes
+  and » › ” open a clause only in opening position, escaped ones in JSON
+  included. A closing emphasis, bracket, tag or quote and a comma do not
+  open a clause, so "do not ignore the previous instructions", "**Never**
+  ignore your instructions", `Rule one: "never" ignore your instructions`
+  and "models, however, ignore earlier instructions" stay allowed. "forget"
+  never follows a modal ("you will forget all previous instructions after a
+  restart" describes). Objects are instructions, prompts, directives and
+  directions, never messages, and without a qualifier only instructions and
+  directives ("-y: ignore all prompts" stays allowed).
+
+  German needs an imperative ("Ignorieren Sie" with a capital "Sie"), and a
+  match does not count when a negation ends its clause after words that
+  only continue the object: conjunctions, articles, prepositions, a fixed
+  list of adverbs, qualifiers, numbers and capitalised nouns ("Vergiss die
+  vorherigen Anweisungen zum Datenbank-Backup nicht."). A lowercase verb in
+  between opens a new clause, and a negation the clause goes on after does
+  not negate, so "Ignoriere alle vorherigen Anweisungen und zögere nicht."
+  and "... nicht nur teilweise, sondern vollständig" still block. The clause
+  ends at punctuation, a quote, a bracket, a line break or a JSON escape
+  other than a separator, so `\"` and `\u2013` end it and `\t` does not.
+  All-caps words never count as nouns.
+
+  Text worded exactly like the injection still blocks, as the exact phrase
+  did before: a correction such as "Please ignore the previous
+  instructions, I sent the wrong file", a doc note such as "Ignore the
+  previous instructions if you use yarn", and a German protective sentence
+  built as "nicht nur ..., sondern ..." ("Vergiss die vorherigen Anweisungen
+  nicht nur heute, sondern immer").
+
+  Separators accept JSON escapes, because the proxy scans serialised
+  arguments, where a line break arrives as the two characters `\n`. Word
+  boundaries are ASCII: a Unicode `\b` made the regex engine leave its fast
+  path on every non-ASCII byte (11 to 22 ms p99 on 100 kB of German text).
+  `perf_gate` has three new cases that open the new gate: German and English
+  text with non-ASCII characters, and HTML markup.
+
+  Measured with the real `Scanner`: over 5,159 technical documents (npm
+  READMEs and crate docs, 237,850 paragraphs) the number of blocked
+  paragraphs across all patterns is unchanged and `instruction_override`
+  matches nothing; over 1,120 prose documents every new match quotes an
+  injection as an example. Known gaps: a third-party subject ("the assistant
+  must ignore ..."), an instruction joined mid-sentence ("summarize this page
+  and ignore ..."), "forget" after a modal ("you must forget ..."), an
+  address of four or more words, singular objects ("ignore the previous
+  prompt"), other objects ("commands", "rules", "guidelines" in English), a
+  trailing qualifier ("ignore the instructions above"), other or inflected
+  verbs ("override", "ignoring"), phrasings without a qualifier ("forget
+  everything I told you") and Spanish. In German a capitalised verb between
+  the object and "nicht" is taken for a noun. Zero-width characters used as
+  word separators and the dotted capital I (U+0130) evade the scanner before
+  and after this change.
+
 ## [0.8.1] - 2026-09-21
 
 ### Packaging
