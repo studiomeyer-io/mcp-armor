@@ -74,7 +74,7 @@ use std::sync::Arc;
 
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, Implementation, InitializeRequestParams,
+    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, InitializeRequestParams,
     InitializeResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
     ServerInfo, Tool,
 };
@@ -114,7 +114,7 @@ impl ArmorState {
 ///
 /// Returns the same `result.structuredContent` JSON value the JSON-RPC
 /// control plane emits. The rmcp wrapper packages it as a
-/// [`CallToolResult`] with both a textual `Content::text(...)` mirror
+/// [`CallToolResult`] with both a textual `ContentBlock::text(...)` mirror
 /// and a `structured_content: Some(value)` payload so MCP clients that
 /// only render text and clients that parse structured outputs both work.
 pub fn dispatch_via_handle_request(
@@ -297,11 +297,11 @@ impl ServerHandler for ArmorRmcpHandler {
                     // MCP clients that parse SEP-1319 structured outputs
                     // and clients that only render text both see the
                     // payload.
-                    let mut result = CallToolResult::success(vec![Content::text(text)]);
+                    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
                     result.structured_content = Some(structured);
                     Ok(result)
                 }
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "error: {e}"
                 ))])),
             }
