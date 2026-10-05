@@ -1425,10 +1425,10 @@ mod tests {
             .expect("drift");
         match outcome {
             DriftKind::Drift(d) => {
-                assert!(d.added.is_empty());
-                assert!(d.removed.is_empty());
+                assert_eq!(d.added, [] as [String; 0]);
+                assert_eq!(d.removed, [] as [String; 0]);
                 assert_eq!(d.description_changed, vec!["get_weather".to_string()]);
-                assert!(d.params_changed.is_empty());
+                assert_eq!(d.params_changed, [] as [ParamDiff; 0]);
                 assert_eq!(d.baseline_iso, "2026-05-28T10:00:00Z");
                 assert_eq!(d.current_iso, "2026-05-29T10:00:00Z");
             }
@@ -1462,7 +1462,7 @@ mod tests {
         match outcome {
             DriftKind::Drift(d) => {
                 assert_eq!(d.added, vec!["exfiltrate".to_string()]);
-                assert!(d.removed.is_empty());
+                assert_eq!(d.removed, [] as [String; 0]);
             }
             other => panic!("expected Drift, got {other:?}"),
         }
@@ -1484,7 +1484,7 @@ mod tests {
         let outcome = h.observe("/bin/x", &v2, "t2").expect("drift");
         match outcome {
             DriftKind::Drift(d) => {
-                assert!(d.added.is_empty());
+                assert_eq!(d.added, [] as [String; 0]);
                 assert_eq!(d.removed, vec!["list_alarms".to_string()]);
             }
             other => panic!("expected Drift, got {other:?}"),

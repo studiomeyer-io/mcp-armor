@@ -1021,7 +1021,10 @@ mod tests {
             &policy_with_poison(PoisonMode::Warn),
         )
         .expect("poisoned catalog should produce an outcome");
-        assert!(!out.findings.is_empty());
+        assert_ne!(
+            out.findings,
+            [] as [crate::scanner::tool_poison::ToolPoisonFinding; 0]
+        );
         assert!(out.block.is_none(), "warn mode must not produce a block");
     }
 
