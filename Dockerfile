@@ -11,7 +11,7 @@
 #
 # Reproducible: builds from source against the committed Cargo.lock.
 
-FROM rust:bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
+FROM rust:bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release --locked --bin mcp-armor
