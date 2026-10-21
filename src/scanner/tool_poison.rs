@@ -563,7 +563,10 @@ mod tests {
             "description": "Return the current weather for a city. Use this when the user asks about the forecast.",
             "inputSchema": {"type": "object", "properties": {"city": {"type": "string", "description": "City name, e.g. Palma."}}}
         }]));
-        assert!(scan_tools_list(&env, true, true).is_empty());
+        assert_eq!(
+            scan_tools_list(&env, true, true),
+            [] as [ToolPoisonFinding; 0]
+        );
     }
 
     #[test]
@@ -643,7 +646,10 @@ mod tests {
             "name": "q", "description": "ok",
             "inputSchema": {"type":"object","properties":{"x":{"type":"string","description": poisoned}}}
         }]));
-        assert!(scan_tools_list(&env, true, false).is_empty());
+        assert_eq!(
+            scan_tools_list(&env, true, false),
+            [] as [ToolPoisonFinding; 0]
+        );
         assert!(ids(&env).contains(&"poison_injection_override".to_string()));
     }
 
@@ -653,7 +659,10 @@ mod tests {
         let env = tools_list(json!([
             {"name":"z","description": poisoned,"inputSchema":{"type":"object","properties":{}}}
         ]));
-        assert!(scan_tools_list(&env, false, false).is_empty());
+        assert_eq!(
+            scan_tools_list(&env, false, false),
+            [] as [ToolPoisonFinding; 0]
+        );
         assert!(ids(&env).contains(&"poison_injection_override".to_string()));
     }
 
@@ -790,7 +799,7 @@ mod tests {
         let findings = scan_tools_list(&env, true, true);
         // It DID find the injection (budget is generous), but visited far
         // fewer than 200k fields.
-        assert!(!findings.is_empty());
+        assert_ne!(findings, [] as [ToolPoisonFinding; 0]);
     }
 
     #[test]
@@ -855,7 +864,10 @@ mod tests {
     #[test]
     fn non_tools_list_envelope_is_noop() {
         let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}});
-        assert!(scan_tools_list(&call, true, true).is_empty());
+        assert_eq!(
+            scan_tools_list(&call, true, true),
+            [] as [ToolPoisonFinding; 0]
+        );
     }
 
     #[test]

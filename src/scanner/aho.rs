@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn prefilter_no_hit_on_clean() {
         let stage = AhoStage::new(&["shell_substitution".to_string()]).expect("build");
-        assert!(stage.matches("ls -la").is_empty());
+        assert_eq!(stage.matches("ls -la"), [] as [String; 0]);
     }
 
     #[test]
@@ -96,6 +96,6 @@ mod tests {
         assert!(stage
             .matches("../../etc/passwd")
             .contains(&"path_traversal".to_string()));
-        assert!(stage.matches("clean/relative/path").is_empty());
+        assert_eq!(stage.matches("clean/relative/path"), [] as [String; 0]);
     }
 }

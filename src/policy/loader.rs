@@ -488,7 +488,7 @@ version = "no-env-guard"
         .expect("write");
         let (pol, _) = load_policy(Some(&p)).expect("ok");
         assert!(!pol.env_key_is_denied("LD_PRELOAD"));
-        assert!(pol.deny_env_keys.is_empty());
+        assert_eq!(pol.deny_env_keys, [] as [String; 0]);
     }
 
     /// v0.3 Feature A — custom deny_env_keys REPLACES the default.
