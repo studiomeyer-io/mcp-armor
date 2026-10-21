@@ -288,8 +288,8 @@ mod tests {
         let s = Scanner::new().expect("scanner builds");
         let r = s.scan("hello world this is fine");
         assert_eq!(r.verdict, ScanVerdict::Allow);
-        assert!(r.matched_patterns.is_empty());
-        assert!(r.cve_refs.is_empty());
+        assert_eq!(r.matched_patterns, [] as [String; 0]);
+        assert_eq!(r.cve_refs, [] as [String; 0]);
     }
 
     #[test]
