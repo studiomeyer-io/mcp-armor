@@ -239,6 +239,7 @@ fn tool_scan_payload(
         "verdict": result.verdict,
         "matched_patterns": result.matched_patterns,
         "cve_refs": result.cve_refs,
+        "simulation_refs": result.simulation_refs,
         "latency_us": result.latency_us
     }))
 }
@@ -357,6 +358,8 @@ fn tool_get_policy(policy: &Policy) -> Value {
         },
         "fail_mode": policy.fail_mode,
         "scan_unicode": policy.scan_unicode,
+        "tool_response_mode": policy.tool_response_mode,
+        "max_frame_bytes": policy.max_frame_bytes,
         "scan_confusable": policy.scan_confusable,
         "deny_env_keys": policy.deny_env_keys,
         "tools_list_drift_detection": policy.tools_list_drift_detection,
@@ -376,92 +379,66 @@ fn tool_check_cve(args: &Value) -> Result<Value, ArmorError> {
         .ok_or_else(|| ArmorError::InvalidPattern("missing server_name".into()))?;
     let server_version = args.get("server_version").and_then(Value::as_str);
     let feed = FEED()?;
-    // F6 fix (S983): two-stage match.
-    //   1) Server-name substring match on `fixed_in` (legacy filter — keeps
-    //      defense-in-depth entries that have `fixed_in = "n/a"` reachable
-    //      via name match alone).
-    //   2) When the caller supplies `server_version` AND the entry has
-    //      `affected_versions` set, use `semver::VersionReq` to drop entries
-    //      whose range does NOT cover the supplied version. Entries without
-    //      a structured range stay in (best-effort) — operator can read
-    //      `fixed_in` themselves.
     let mut affected = Vec::new();
-    let needle = server_name.to_ascii_lowercase();
-    let parsed_version: Option<semver::Version> =
-        server_version.and_then(|v| semver::Version::parse(v.trim_start_matches('v')).ok());
+    let mut unknown = Vec::new();
+    let mut not_affected = Vec::new();
+    let mut sources = Vec::new();
     let mut version_match_used = false;
     for cve in &feed.cves {
-        let fixed = cve.fixed_in.to_ascii_lowercase();
-        if !fixed.contains(&needle) {
+        if !cve.matches_product(server_name) {
             continue;
         }
-        // Version-aware filter — only when both sides supply structured data.
-        if let (Some(parsed_v), Some(range_str)) =
-            (parsed_version.as_ref(), cve.affected_versions.as_ref())
-        {
-            match semver::VersionReq::parse(range_str) {
-                Ok(req) => {
-                    version_match_used = true;
-                    if !req.matches(parsed_v) {
-                        continue;
-                    }
-                }
-                Err(_) => {
-                    // Malformed range in feed — fall back to inclusion.
-                    // Better to over-report than silently drop a CVE.
-                }
-            }
+        let status = cve.version_status(server_version);
+        version_match_used |= matches!(status, "affected" | "not_affected");
+        sources.push(cve.source_url.clone());
+        let entry = json!({
+            "id": cve.id, "product": cve.product,
+            "severity": cve.severity.as_str(), "title": cve.title,
+            "fixed_in": cve.fixed_in, "affected_versions": cve.affected_versions,
+            "version_status": status, "source_url": cve.source_url,
+            "checked_at": cve.checked_at,
+        });
+        match status {
+            "unknown" => unknown.push(entry),
+            "not_affected" => not_affected.push(entry),
+            _ => affected.push(entry),
         }
-        affected.push(json!({
-            "id": cve.id,
-            "severity": cve.severity.as_str(),
-            "title": cve.title,
-            "fixed_in": cve.fixed_in,
-            "affected_versions": cve.affected_versions
-        }));
     }
-    // v0.5 R2 Analyst-W2 fix: the feed is no longer OX-only. The
-    // 2026-05-28 refresh wave merged in Lyrie MCP-1.4 batch + rmcp
-    // DNS-rebinding + n8n-mcp credential leak + Excel-MCP path
-    // traversal entries. Surface the full provenance list so tool
-    // consumers know which advisories the answer is grounded in.
     Ok(json!({
-        "affected_cves": affected,
+        "affected_cves": affected, "unknown_cves": unknown,
+        "not_affected_cves": not_affected,
         "server_version_queried": server_version,
         "version_match_used": version_match_used,
-        "advisories_consulted": [
-            "ox-advisory-2026-04-15",
-            "lyrie-mcp-1.4-batch-2026-04",
-            "nvd-rmcp-cve-2026-42559",
-            "nvd-n8n-mcp-cve-2026-42282",
-            "nvd-excel-mcp-cve-2026-40576",
-            "ultraviolet-cyber-mcp-advisory-2026-05-27",
-            "owasp-mcp-top-10-2026",
-            "practical-devsecops-mcp-survey-2026"
-        ],
+        "advisories_consulted": sources,
         "feed_generated": feed.generated,
-        "cve_database_age_days": cve_database_age_days(&feed.generated)
+        "cve_database_age_days": cve_database_age_days(&feed.generated),
+        "scope": "Product advisories only. No scanner detection or remediation claim. Empty results are not a safety verdict."
     }))
 }
 
 fn tool_simulate_attack(args: &Value, scanner: &Scanner) -> Result<Value, ArmorError> {
-    let cve_id = args
-        .get("cve_id")
+    let requested = args
+        .get("simulation_id")
+        .or_else(|| args.get("cve_id"))
         .and_then(Value::as_str)
-        .ok_or_else(|| ArmorError::InvalidPattern("missing cve_id".into()))?;
-    let feed = FEED()?;
-    let cve = feed
-        .find(cve_id)
-        .ok_or_else(|| ArmorError::UnknownCve(cve_id.to_string()))?;
-    // Scanner runs on the static simulate_payload — never spawns the upstream
-    // binary. Asserts the falsifiable Pillar-3 contract.
-    let result = scanner.scan(&cve.simulate_payload);
+        .ok_or_else(|| {
+            ArmorError::InvalidPattern("missing simulation_id (legacy cve_id is accepted)".into())
+        })?;
+    let feed = crate::cve::simulations()?;
+    let simulation = feed
+        .find(requested)
+        .or_else(|| feed.resolve_legacy(requested))
+        .ok_or_else(|| ArmorError::InvalidPattern(format!("unknown simulation: {requested}")))?;
+    let result = scanner.scan(&simulation.simulate_payload);
     Ok(json!({
-        "payload": cve.simulate_payload,
-        "expected_verdict": "block",
-        "actual_verdict": result.verdict,
-        "scanner_path": ["aho", "regex", "unicode"],
+        "simulation_id": simulation.id,
+        "legacy_input": requested.starts_with("CVE-"),
+        "scope": "Internal pattern fixture only; not a CVE exploit, product association or remediation proof.",
+        "payload": simulation.simulate_payload,
+        "expected_verdict": "block", "actual_verdict": result.verdict,
+        "scanner_path": ["aho", "regex", "unicode", "confusable"],
         "matched_patterns": result.matched_patterns,
+        "cve_refs": result.cve_refs, "simulation_refs": result.simulation_refs,
         "latency_us": result.latency_us
     }))
 }

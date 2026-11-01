@@ -931,7 +931,7 @@ fn tool_fingerprint(t: &Value, opts: FingerprintOpts) -> Result<ToolFingerprint,
         .and_then(Value::as_str)
         .ok_or_else(|| ArmorError::InvalidPattern("tool entry missing name field".to_string()))?;
     // v0.5 R1 Research-P0 fix: canonicalise tool-name via NFKC + zero-width
-    // strip + trim BEFORE hashing. Closes the Lyrie MCP-1.4 / CVE-2026-29774
+    // strip + trim BEFORE hashing. Closes the Lyrie MCP-1.4 / internal tool-name collision
     // class where adversaries register tools with names that visually
     // collide with legitimate ones but yield different raw bytes.
     let name = canonicalize_identifier(raw_name);
@@ -1089,7 +1089,7 @@ fn is_invisible_identifier_char(c: char) -> bool {
 /// bytes differ.
 ///
 /// This is the comparison key used by [`tool_name_collision`] to catch
-/// the CVE-2026-29774 class (a tool registered under a name that
+/// the internal tool-name collision class (a tool registered under a name that
 /// visually collides with a trusted tool — `send_message` with a
 /// zero-width suffix, or Cyrillic `ѕend_message`).
 #[must_use]
@@ -1100,7 +1100,7 @@ pub fn fold_identifier(raw: &str) -> String {
 }
 
 /// v0.7 — detect a tool-name homoglyph / zero-width collision against a
-/// set of known tool names. This is CVE-2026-29774's actual class: an
+/// set of known tool names. This is internal tool-name collision's actual class: an
 /// adversary registers a tool whose name *renders* identically to a
 /// trusted tool but carries different bytes (zero-width insert, Cyrillic
 /// homoglyph, full-width form), so a model that "sees" the trusted name
@@ -1936,7 +1936,7 @@ mod tests {
         );
     }
 
-    // ─── v0.7 tool-name homoglyph / zero-width collision (CVE-2026-29774) ─
+    // ─── v0.7 tool-name homoglyph / zero-width collision (internal tool-name collision) ─
 
     #[test]
     fn fold_identifier_strips_zero_width_and_lowercases() {
@@ -1957,7 +1957,7 @@ mod tests {
 
     #[test]
     fn tool_name_collision_catches_zero_width_suffix() {
-        // The literal CVE-2026-29774 example: send_message with a
+        // The literal internal tool-name collision example: send_message with a
         // zero-width space suffix collides with the trusted send_message.
         let known = vec!["send_message".to_string(), "get_weather".to_string()];
         let attacker = "send_message\u{200B}";

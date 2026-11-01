@@ -13,6 +13,17 @@ pub enum FailMode {
     Closed,
 }
 
+/// Enforcement for detected injections in tool results. Uncorrelated result
+/// envelopes also block in Block mode rather than bypassing correlation.
+/// Independent of inbound `fail_mode`; warn preserves existing behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResponseMode {
+    #[default]
+    Warn,
+    Block,
+}
+
 /// Default set of environment-variable keys that are stripped from the
 /// upstream child process on `mcp-armor wrap`. v0.3 Feature A
 /// (Zealynx forensic 2026 — registry-fetched MCP manifests can specify
@@ -53,6 +64,15 @@ pub const DEFAULT_DENY_ENV_KEYS: &[&str] = &[
 pub struct Policy {
     pub fail_mode: FailMode,
     pub scan_unicode: bool,
+    /// `warn` (default) forwards tool results; `block` replaces matched
+    /// tools/call or uncorrelated results with an error carrying the same ID.
+    #[serde(default)]
+    pub tool_response_mode: ToolResponseMode,
+    /// Maximum bytes per stdio frame (excluding newline), in each direction.
+    /// Default 16 MiB; positive and bounded by 256 MiB. Oversize terminates
+    /// the connection before any partial frame is forwarded.
+    #[serde(default = "default_max_frame_bytes")]
+    pub max_frame_bytes: usize,
     /// Pattern ids to never block (override scanner verdict to allow).
     #[serde(default)]
     pub allow_patterns: Vec<String>,
@@ -174,6 +194,13 @@ pub struct Policy {
     pub version: String,
 }
 
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CONFIGURED_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
+fn default_max_frame_bytes() -> usize {
+    DEFAULT_MAX_FRAME_BYTES
+}
+
 fn default_deny_env_keys() -> Vec<String> {
     DEFAULT_DENY_ENV_KEYS
         .iter()
@@ -190,6 +217,8 @@ impl Default for Policy {
         Self {
             fail_mode: FailMode::Closed,
             scan_unicode: true,
+            tool_response_mode: ToolResponseMode::default(),
+            max_frame_bytes: default_max_frame_bytes(),
             allow_patterns: Vec::new(),
             allow_servers: Vec::new(),
             allow_patterns_per_tool: BTreeMap::new(),
@@ -207,6 +236,15 @@ impl Default for Policy {
 }
 
 impl Policy {
+    pub fn validate(&self) -> Result<(), ArmorError> {
+        if self.max_frame_bytes == 0 || self.max_frame_bytes > MAX_CONFIGURED_FRAME_BYTES {
+            return Err(ArmorError::InvalidPattern(format!(
+                "policy max_frame_bytes must be between 1 and {MAX_CONFIGURED_FRAME_BYTES}"
+            )));
+        }
+        Ok(())
+    }
+
     /// v0.3 Feature A — case-insensitive membership test against
     /// `deny_env_keys`. Returns `true` when `env_key` should be stripped
     /// from the child process env (or, on the operator side, warned about
@@ -322,6 +360,7 @@ pub fn load_policy(path: Option<&Path>) -> Result<(Policy, PathBuf), ArmorError>
 
     let raw = std::fs::read_to_string(&resolved)?;
     let p: Policy = toml::from_str(&raw)?;
+    p.validate()?;
     Ok((p, resolved))
 }
 
@@ -342,6 +381,24 @@ pub fn default_path() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn response_mode_and_frame_limit_are_compatible_validated_defaults() {
+        let policy = Policy::default();
+        assert_eq!(policy.tool_response_mode, ToolResponseMode::Warn);
+        assert_eq!(policy.max_frame_bytes, 16 * 1024 * 1024);
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("policy.toml");
+        for limit in [0, MAX_CONFIGURED_FRAME_BYTES + 1] {
+            std::fs::write(&path, format!("fail_mode = \"closed\"\nscan_unicode = true\nversion = \"test\"\nmax_frame_bytes = {limit}\n")).expect("write");
+            assert!(load_policy(Some(&path)).is_err());
+        }
+        std::fs::write(&path, "fail_mode = \"open\"\nscan_unicode = true\nversion = \"test\"\nmax_frame_bytes = 1024\ntool_response_mode = \"block\"\n").expect("write");
+        let (policy, _) = load_policy(Some(&path)).expect("valid config");
+        assert_eq!(policy.max_frame_bytes, 1024);
+        assert_eq!(policy.tool_response_mode, ToolResponseMode::Block);
+        assert_eq!(policy.fail_mode, FailMode::Open);
+    }
 
     #[test]
     fn missing_file_returns_default() {

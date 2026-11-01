@@ -29,6 +29,8 @@ pub struct HistoryEntry {
     pub direction: String,
     pub matched_patterns: Vec<String>,
     pub cve_refs: Vec<String>,
+    #[serde(default)]
+    pub simulation_refs: Vec<String>,
     pub latency_us: u64,
 }
 
@@ -69,6 +71,7 @@ impl ScanHistory {
             direction: direction.to_string(),
             matched_patterns: result.matched_patterns.clone(),
             cve_refs: result.cve_refs.clone(),
+            simulation_refs: result.simulation_refs.clone(),
             latency_us: result.latency_us,
         };
         let mut buf = lock_inner(&self.inner);
@@ -127,7 +130,8 @@ mod tests {
         ScanResult {
             verdict: ScanVerdict::Block,
             matched_patterns: vec![pattern.to_string()],
-            cve_refs: vec!["CVE-X".to_string()],
+            cve_refs: Vec::new(),
+            simulation_refs: vec!["ARMOR-SIM-SHELL-SUBSTITUTION".to_string()],
             latency_us: 42,
         }
     }
@@ -139,6 +143,7 @@ mod tests {
             verdict: ScanVerdict::Allow,
             matched_patterns: vec![],
             cve_refs: vec![],
+            simulation_refs: vec![],
             latency_us: 5,
         };
         h.record("inbound", &r);

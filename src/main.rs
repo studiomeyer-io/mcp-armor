@@ -205,8 +205,20 @@ enum SigstoreCmd {
     },
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // Tokio stdin uses an uncancellable blocking read. After a transport
+    // error or upstream EOF, runtime Drop would otherwise wait forever for
+    // the caller to close stdin. The proxy has already killed/reaped its
+    // child and the telemetry guard has dropped before shutdown here.
+    runtime.shutdown_background();
+    result
+}
+
+async fn run() -> Result<()> {
     let _otel = mcp_armor::otel::init().context("init telemetry")?;
     let cli = Cli::parse();
 
@@ -334,12 +346,13 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "direction": direction,
-                    "verdict": result.verdict,
-                    "matched_patterns": result.matched_patterns,
-                    "cve_refs": result.cve_refs,
-                    "latency_us": result.latency_us
-                }))?
+                            "direction": direction,
+                            "verdict": result.verdict,
+                            "matched_patterns": result.matched_patterns,
+                            "cve_refs": result.cve_refs,
+                "simulation_refs": result.simulation_refs,
+                            "latency_us": result.latency_us
+                        }))?
             );
             if matches!(result.verdict, mcp_armor::ScanVerdict::Block) {
                 std::process::exit(3);

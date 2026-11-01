@@ -6,12 +6,11 @@
 //! ("disregard") passed as Allow: the Aho-Corasick prefilter knew fixed
 //! phrases only, so the regex stage never ran for them.
 //!
-//! Why a gate of their own instead of new prefilter triggers: the prefilter
-//! is ONE gate for every pattern. Any trigger that fires runs the regexes of
-//! all patterns, so a common verb such as "ignore" (also in ".gitignore")
-//! as a trigger changed the verdict of unrelated patterns. Here the gate
-//! only decides whether the regexes below run, and a hit only ever reports
-//! `instruction_override`.
+//! The variants keep their own gate and report only `instruction_override`.
+//! The main scanner now gates each pattern independently as well. This
+//! preserves the original isolation rule: adding an override verb must not
+//! activate unrelated localhost, shell, or HTML rules. The variant matcher
+//! additionally supplies the clause and negation checks described below.
 //!
 //! Precision rules, each pinned by a test:
 //! - the verb has to open a clause. Openers are the start of the text, a

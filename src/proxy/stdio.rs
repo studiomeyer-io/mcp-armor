@@ -11,20 +11,163 @@ use crate::manifest::drift::{
     self, default_path as drift_default_path, drift_block_inbound_response, drift_block_response,
     inject_fingerprint_meta, tool_name_collision, DriftKind, DriftMode, History as DriftHistory,
 };
-use crate::policy::{snapshot, FailMode, Policy, PolicyHandle};
+use crate::policy::{snapshot, FailMode, Policy, PolicyHandle, ToolResponseMode};
 use crate::scanner::tool_poison::{
     block_eligible, distinct_pattern_ids, poison_block_response, scan_tools_list, PoisonMode,
 };
 use crate::scanner::{ScanResult, ScanVerdict, Scanner};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+
+/// Maximum bytes in one stdio JSON-RPC frame, excluding the newline.
+/// Both directions enforce this while reading, before allocating the full line.
+pub const MAX_FRAME_BYTES: usize = crate::policy::loader::DEFAULT_MAX_FRAME_BYTES;
+const MAX_PENDING_REQUESTS: usize = 4096;
+const MAX_PENDING_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const EOF_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn read_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<Option<String>> {
+    let mut frame = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if frame.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let end = available.iter().position(|b| *b == b'\n');
+        let take = end.unwrap_or(available.len());
+        if take > max_bytes.saturating_sub(frame.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("JSON-RPC frame exceeds {max_bytes}-byte limit"),
+            ));
+        }
+        frame.extend_from_slice(&available[..take]);
+        reader.consume(take + usize::from(end.is_some()));
+        if end.is_some() {
+            break;
+        }
+    }
+    if frame.last() == Some(&b'\r') {
+        frame.pop();
+    }
+    String::from_utf8(frame)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+type PendingRequests = Arc<Mutex<HashMap<String, (String, Option<String>)>>>;
+type ClientOutput = Arc<tokio::sync::Mutex<tokio::io::Stdout>>;
+
+async fn write_client(output: &ClientOutput, payload: &[u8]) -> io::Result<()> {
+    let mut stdout = output.lock().await;
+    stdout.write_all(payload).await?;
+    stdout.flush().await
+}
+
+/// Exact decimal canonicalization. JSON numeric spellings such as 1, 1.0
+/// and 1e0 share a key without rounding large integers or close fractions.
+/// serde_json's arbitrary_precision feature preserves the original digits.
+fn request_id_key(id: &Value) -> Result<String, ArmorError> {
+    let invalid = || ArmorError::InvalidPattern("unsupported JSON-RPC request ID".into());
+    match id {
+        Value::Null => Ok("null:".into()),
+        Value::String(id) => Ok(format!("string:{id}")),
+        Value::Number(number) => {
+            let raw = number.to_string();
+            let (mantissa, exponent) = raw.split_once(['e', 'E']).unwrap_or((&raw, "0"));
+            let (sign, mantissa) = mantissa
+                .strip_prefix('-')
+                .map_or(("", mantissa), |m| ("-", m));
+            let fractional = mantissa
+                .split_once('.')
+                .map_or(0, |(_, fraction)| fraction.len());
+            let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+            let digits = digits.trim_start_matches('0');
+            if digits.is_empty() {
+                return Ok("number:0".into());
+            }
+            let significant = digits.trim_end_matches('0');
+            let trailing =
+                i64::try_from(digits.len() - significant.len()).map_err(|_| invalid())?;
+            let fractional = i64::try_from(fractional).map_err(|_| invalid())?;
+            let exponent = exponent
+                .parse::<i64>()
+                .map_err(|_| invalid())?
+                .checked_sub(fractional)
+                .and_then(|e| e.checked_add(trailing))
+                .ok_or_else(invalid)?;
+            Ok(format!("number:{sign}{significant}e{exponent}"))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn register_request(pending: &PendingRequests, envelope: &Value) -> Result<(), ArmorError> {
+    let Some(method) = envelope.get("method").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let Some(id) = envelope
+        .get("id")
+        .filter(|id| id.is_string() || id.is_number() || id.is_null())
+    else {
+        return Ok(());
+    };
+    let mut requests = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let id = request_id_key(id)?;
+    if requests.len() >= MAX_PENDING_REQUESTS || requests.contains_key(&id) {
+        return Err(ArmorError::InvalidPattern(
+            "too many pending requests or duplicate request ID".into(),
+        ));
+    }
+    let tool = extract_tool_name(envelope);
+    let metadata_bytes = requests
+        .iter()
+        .map(|(id, (method, tool))| id.len() + method.len() + tool.as_ref().map_or(0, String::len))
+        .sum::<usize>();
+    let new_bytes = id.len() + method.len() + tool.as_ref().map_or(0, String::len);
+    if new_bytes > MAX_PENDING_METADATA_BYTES.saturating_sub(metadata_bytes) {
+        return Err(ArmorError::InvalidPattern(
+            "pending request metadata exceeds 16 MiB limit".into(),
+        ));
+    }
+    requests.insert(id, (method.to_string(), tool));
+    Ok(())
+}
+
+fn take_response_request(
+    pending: &PendingRequests,
+    envelope: &Value,
+) -> Result<Option<(String, Option<String>)>, ArmorError> {
+    if envelope.get("method").is_some()
+        || (envelope.get("result").is_none() && envelope.get("error").is_none())
+    {
+        return Ok(None);
+    }
+    let Some(id) = envelope.get("id") else {
+        return Ok(None);
+    };
+    Ok(pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&request_id_key(id)?))
+}
 
 /// Block-verdict response sent back to the client when fail_mode=Closed and
 /// the scanner blocks an inbound call.
-fn block_response(id: Value, matched: &[String], cves: &[String]) -> Value {
+fn block_response(id: Value, matched: &[String], cves: &[String], simulations: &[String]) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -33,7 +176,8 @@ fn block_response(id: Value, matched: &[String], cves: &[String]) -> Value {
             "message": "blocked by mcp-armor",
             "data": {
                 "matched_patterns": matched,
-                "cve_refs": cves
+                "cve_refs": cves,
+                "simulation_refs": simulations
             }
         }
     })
@@ -382,6 +526,7 @@ pub async fn run_proxy(
     history: Arc<ScanHistory>,
     drift_history_path: Option<PathBuf>,
 ) -> Result<(), ArmorError> {
+    snapshot(&policy).validate()?;
     let drift_history_path = drift_history_path.unwrap_or_else(drift_default_path);
     // v0.3 Feature A — strip loader-class env keys from the child
     // process before spawn. Closes the Zealynx 2026 side-channel where a
@@ -409,6 +554,7 @@ pub async fn run_proxy(
             "v0.3 Feature A: stripped loader-class env keys from child process before spawn — set policy.deny_env_keys=[] to disable"
         );
     }
+    cmd.kill_on_drop(true);
     let mut child: Child = cmd.spawn()?;
 
     let mut child_stdin = child
@@ -438,14 +584,18 @@ pub async fn run_proxy(
     let program_for_in = program.to_string();
     let program_for_out = program.to_string();
 
+    let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+    let pending_in = pending.clone();
+    let output: ClientOutput = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+    let output_in = output.clone();
+
     // Inbound: client → child, scanned (unless allowlisted).
     let drift_history_path_in = drift_history_path.clone();
-    let inbound = tokio::spawn(async move {
+    let mut inbound = tokio::spawn(async move {
         let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin).lines();
-        let mut stdout = tokio::io::stdout();
+        let mut reader = BufReader::new(stdin);
         loop {
-            let line = match reader.next_line().await {
+            let line = match read_frame(&mut reader, snapshot(&policy_in).max_frame_bytes).await {
                 Ok(Some(line)) => line,
                 Ok(None) => break,
                 Err(e) => return Err::<(), ArmorError>(ArmorError::Io(e)),
@@ -481,8 +631,7 @@ pub async fn run_proxy(
             {
                 let mut out = serde_json::to_string(&block)?;
                 out.push('\n');
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.flush().await?;
+                write_client(&output_in, out.as_bytes()).await?;
                 continue;
             }
 
@@ -491,20 +640,24 @@ pub async fn run_proxy(
             // a SIGHUP reload that removes a server from `allow_servers`
             // takes effect on the next envelope.
             if server_is_allowlisted(&program_for_in, &pol.allow_servers) {
+                register_request(&pending_in, &envelope)?;
                 let mut out = line;
                 out.push('\n');
                 child_stdin.write_all(out.as_bytes()).await?;
                 continue;
             }
 
-            let scan_target = extract_scan_target(&envelope);
+            let scan_target = envelope.get("params").unwrap_or(&envelope);
             // v0.3 R1-CRIT fix: thread `pol.scan_confusable` through so the
             // operator's policy.toml toggle is actually honoured. Before
             // this fix, `scan_with(payload, scan_unicode)` hard-coded
             // Stage 4 = on (`scan_confusable=true`) and the new
             // `policy.scan_confusable` field was a dead knob.
-            let mut result =
-                scanner_in.scan_with_opts(&scan_target, pol.scan_unicode, pol.scan_confusable);
+            let mut result = scanner_in.scan_rpc_params_with_opts(
+                scan_target,
+                pol.scan_unicode,
+                pol.scan_confusable,
+            );
             let tool_name = extract_tool_name(&envelope);
 
             let allow_pattern_global = !result.matched_patterns.is_empty()
@@ -521,7 +674,7 @@ pub async fn run_proxy(
             let allow_pattern = allow_pattern_global || allow_pattern_per_tool;
 
             // v0.7 — tool-name homoglyph / zero-width collision check
-            // (CVE-2026-29774 class). The drift baseline is the known-tool
+            // (internal tool-name collision class). The drift baseline is the known-tool
             // set; a `tools/call` whose name folds (canonicalise +
             // confusable skeleton) to a known tool but whose raw bytes are
             // NOT that tool is an impersonation attempt. Stage 4 only folds
@@ -552,15 +705,21 @@ pub async fn run_proxy(
                         .matched_patterns
                         .push(TOOL_NAME_COLLISION_PATTERN.to_string());
                 }
-                if !result.cve_refs.iter().any(|c| c == TOOL_NAME_COLLISION_CVE) {
-                    result.cve_refs.push(TOOL_NAME_COLLISION_CVE.to_string());
+                if !result
+                    .simulation_refs
+                    .iter()
+                    .any(|s| s == TOOL_NAME_COLLISION_SIMULATION)
+                {
+                    result
+                        .simulation_refs
+                        .push(TOOL_NAME_COLLISION_SIMULATION.to_string());
                 }
                 result.verdict = ScanVerdict::Block;
                 tracing::warn!(
                     program = %program_for_in,
                     raw_tool = %tool_name.as_deref().unwrap_or(""),
                     impersonated = %impersonated,
-                    "tool-name homoglyph/zero-width collision: incoming tools/call name folds to a trusted tool but is not byte-equal (CVE-2026-29774 class)"
+                    "tool-name homoglyph/zero-width collision: incoming tools/call name folds to a trusted tool but is not byte-equal (internal tool-name collision class)"
                 );
             }
 
@@ -583,11 +742,15 @@ pub async fn run_proxy(
 
             if blocked && matches!(pol.fail_mode, FailMode::Closed) {
                 let id = envelope.get("id").cloned().unwrap_or(Value::Null);
-                let response = block_response(id, &result.matched_patterns, &result.cve_refs);
+                let response = block_response(
+                    id,
+                    &result.matched_patterns,
+                    &result.cve_refs,
+                    &result.simulation_refs,
+                );
                 let mut out = serde_json::to_string(&response)?;
                 out.push('\n');
-                stdout.write_all(out.as_bytes()).await?;
-                stdout.flush().await?;
+                write_client(&output_in, out.as_bytes()).await?;
                 tracing::warn!(
                     program = %program_name,
                     tool = %tool_name.as_deref().unwrap_or(""),
@@ -609,6 +772,7 @@ pub async fn run_proxy(
                 );
             }
 
+            register_request(&pending_in, &envelope)?;
             let mut out = line;
             out.push('\n');
             child_stdin.write_all(out.as_bytes()).await?;
@@ -617,16 +781,16 @@ pub async fn run_proxy(
         Ok(())
     });
 
-    // Outbound: child → client, scanned (warn-only — never block server output).
+    // Outbound: child → client. Warn by default; opt-in blocking applies
+    // to successful tools/call results and uncorrelated result envelopes.
     let scanner_out = scanner.clone();
     let policy_out = policy.clone();
     let history_out = history.clone();
     let drift_history_path_out = drift_history_path.clone();
-    let outbound = tokio::spawn(async move {
-        let mut reader = BufReader::new(child_stdout).lines();
-        let mut stdout = tokio::io::stdout();
+    let mut outbound = tokio::spawn(async move {
+        let mut reader = BufReader::new(child_stdout);
         loop {
-            let line = match reader.next_line().await {
+            let line = match read_frame(&mut reader, snapshot(&policy_out).max_frame_bytes).await {
                 Ok(Some(line)) => line,
                 Ok(None) => break,
                 Err(e) => return Err::<(), ArmorError>(ArmorError::Io(e)),
@@ -639,20 +803,64 @@ pub async fn run_proxy(
             let mut drift_decision: DriftDecision = DriftDecision::PassThrough;
             if !trimmed.is_empty() {
                 let pol: Policy = snapshot(&policy_out);
+                let envelope = serde_json::from_str::<Value>(trimmed).ok();
+                let request = if let Some(envelope) = &envelope {
+                    take_response_request(&pending, envelope)?
+                } else {
+                    None
+                };
                 // Round 1 M4 fix: outbound also re-evaluates allow_servers
                 // per-line so SIGHUP reloads are honoured symmetrically.
                 if !server_is_allowlisted(&program_for_out, &pol.allow_servers) {
                     // v0.3 R1-CRIT fix: thread `pol.scan_confusable` —
                     // see inbound-handler comment above for rationale.
-                    let result: ScanResult =
-                        scanner_out.scan_with_opts(trimmed, pol.scan_unicode, pol.scan_confusable);
+                    let result: ScanResult = envelope.as_ref().map_or_else(
+                        || {
+                            scanner_out.scan_with_opts(
+                                trimmed,
+                                pol.scan_unicode,
+                                pol.scan_confusable,
+                            )
+                        },
+                        |e| {
+                            scanner_out.scan_json_with_opts(
+                                e,
+                                pol.scan_unicode,
+                                pol.scan_confusable,
+                            )
+                        },
+                    );
                     if !result.matched_patterns.is_empty() {
-                        // Outbound is warn-only (server→client traffic,
-                        // tool-name attribution unreliable).
+                        // Correlation supplies the original tool name, never a
+                        // name asserted by the untrusted server response.
                         let allow_pattern = result
                             .matched_patterns
                             .iter()
-                            .all(|p| pol.allow_patterns.contains(p));
+                            .all(|p| pol.allow_patterns.contains(p))
+                            || request
+                                .as_ref()
+                                .and_then(|(_, tool)| tool.as_deref())
+                                .is_some_and(|tool| {
+                                    pol.tool_allows_patterns(tool, &result.matched_patterns)
+                                });
+                        let block = !allow_pattern
+                            && pol.tool_response_mode == ToolResponseMode::Block
+                            && request
+                                .as_ref()
+                                .is_none_or(|(method, _)| method == "tools/call")
+                            && envelope.as_ref().is_some_and(|e| {
+                                e.get("method").is_none() && e.get("result").is_some()
+                            });
+                        if block {
+                            if let Some(envelope) = &envelope {
+                                drift_decision = DriftDecision::Replace(block_response(
+                                    envelope.get("id").cloned().unwrap_or(Value::Null),
+                                    &result.matched_patterns,
+                                    &result.cve_refs,
+                                    &result.simulation_refs,
+                                ));
+                            }
+                        }
                         if !allow_pattern {
                             history_out.record("outbound", &result);
                             crate::otel::emit_block_span(
@@ -666,7 +874,8 @@ pub async fn run_proxy(
                             matched = ?result.matched_patterns,
                             cves = ?result.cve_refs,
                             latency_us = result.latency_us,
-                            "outbound match (warn-only)"
+                            blocked = block,
+                            "outbound match"
                         );
                     }
                 }
@@ -679,12 +888,15 @@ pub async fn run_proxy(
                 // coverage — rug-pulls don't care about `allow_servers`.
                 if pol.tools_list_drift_detection != DriftMode::Off || pol.inject_fingerprint_meta {
                     if let Ok(envelope) = serde_json::from_str::<Value>(trimmed) {
-                        drift_decision = run_drift_check(
+                        let drift = run_drift_check(
                             &program_for_out,
                             &envelope,
                             &pol,
                             &drift_history_path_out,
                         );
+                        if !matches!(drift_decision, DriftDecision::Replace(_)) {
+                            drift_decision = drift;
+                        }
                     }
                 }
 
@@ -721,6 +933,7 @@ pub async fn run_proxy(
                                     verdict: ScanVerdict::Block,
                                     matched_patterns: patterns.clone(),
                                     cve_refs: Vec::new(),
+                                    simulation_refs: Vec::new(),
                                     latency_us: 0,
                                 };
                                 history_out.record("tools_list_poison", &poison_result);
@@ -796,41 +1009,39 @@ pub async fn run_proxy(
                     s
                 }
             };
-            stdout.write_all(payload.as_bytes()).await?;
-            stdout.flush().await?;
+            write_client(&output, payload.as_bytes()).await?;
         }
         Ok(())
     });
 
-    // v0.4 Round-3 review HIGH fix — zombie-child elimination.
-    //
-    // The v0.3 path used `tokio::try_join!(...)?` which short-circuits the
-    // *first* error and drops the surviving direction. When `try_join` then
-    // bailed out via `?` the function returned before `child.wait()` ran,
-    // leaving the upstream process in a kernel ZOMBIE state for the
-    // lifetime of mcp-armor. Long-running orchestrators (Claude Desktop,
-    // Cursor) that re-wrap servers across reload cycles would accumulate
-    // those zombies.
-    //
-    // v0.4 fix: drive both directions to completion via `tokio::join!`
-    // (which never short-circuits), then ALWAYS issue `child.kill().await`
-    // followed by `child.wait().await` so the child is reaped regardless
-    // of which direction errored. `kill` on `tokio::process::Child` is
-    // idempotent — calling it on a process that has already exited
-    // returns `Ok(())`. Only after the child is reaped do we surface any
-    // direction's error back to the caller.
-    let (inbound_res, outbound_res) = tokio::join!(inbound, outbound);
-
-    // Always reap the child — never leak a zombie even on inbound/outbound error.
+    // A frame error must stop the opposite direction immediately; joining
+    // both first can hang forever on an upstream that keeps stdin/stdout open.
+    let (inbound_res, outbound_res) = tokio::select! {
+        result = &mut inbound => {
+            if matches!(&result, Ok(Ok(()))) {
+                match tokio::time::timeout(EOF_DRAIN_TIMEOUT, &mut outbound).await {
+                    Ok(outbound) => (Some(result), Some(outbound)),
+                    Err(_) => {
+                        outbound.abort();
+                        (Some(Ok(Err(ArmorError::Io(io::Error::new(io::ErrorKind::TimedOut,
+                            "upstream did not finish within the stdin EOF drain interval"))))), None)
+                    }
+                }
+            } else {
+                outbound.abort();
+                (Some(result), None)
+            }
+        }
+        result = &mut outbound => {
+            inbound.abort();
+            (None, Some(result))
+        }
+    };
     let _ = child.kill().await;
     let _ = child.wait().await;
-
-    let inbound_res = inbound_res
-        .map_err(|e| ArmorError::InvalidPattern(format!("inbound task join error: {e}")))?;
-    let outbound_res = outbound_res
-        .map_err(|e| ArmorError::InvalidPattern(format!("outbound task join error: {e}")))?;
-    inbound_res?;
-    outbound_res?;
+    for result in [inbound_res, outbound_res].into_iter().flatten() {
+        result.map_err(|e| ArmorError::InvalidPattern(format!("proxy task join error: {e}")))??;
+    }
     Ok(())
 }
 
@@ -841,9 +1052,9 @@ pub async fn run_proxy(
 /// refused.
 pub(crate) const TOOL_NAME_COLLISION_PATTERN: &str = "tool_name_collision";
 
-/// v0.7 — CVE this collision class corresponds to (Lyrie MCP-1.4
-/// tool-name collision batch). Surfaced in the block's `cve_refs`.
-pub(crate) const TOOL_NAME_COLLISION_CVE: &str = "CVE-2026-29774";
+/// Internal simulation reference for the tool-name collision control.
+/// This is not a product advisory and never enters `cve_refs`.
+pub(crate) const TOOL_NAME_COLLISION_SIMULATION: &str = "ARMOR-SIM-TOOL-NAME-COLLISION";
 
 /// v0.7 — detect a tool-name homoglyph / zero-width collision for an
 /// inbound `tools/call`, using the drift baseline as the known-tool set.
@@ -914,6 +1125,7 @@ fn extract_tool_name(envelope: &Value) -> Option<String> {
 /// Pluck the part of the envelope worth scanning. Concretely:
 /// `params.arguments` plus the `params.name` (tool name). Keeps payload
 /// small so scanner stays in p99 budget.
+#[cfg(test)]
 fn extract_scan_target(envelope: &Value) -> String {
     let mut buf = String::new();
     if let Some(params) = envelope.get("params") {
@@ -935,6 +1147,159 @@ fn extract_scan_target(envelope: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn frame_reader_enforces_limit_before_newline_or_eof() {
+        for suffix in [b"".as_slice(), b"\n".as_slice()] {
+            let mut bytes = vec![b'x'; MAX_FRAME_BYTES + 1];
+            bytes.extend_from_slice(suffix);
+            let mut reader = BufReader::new(bytes.as_slice());
+            let error = read_frame(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .expect_err("oversize must fail");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let bytes = vec![b'x'; MAX_FRAME_BYTES];
+        let mut reader = BufReader::new(bytes.as_slice());
+        assert_eq!(
+            read_frame(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .expect("boundary")
+                .expect("frame")
+                .len(),
+            MAX_FRAME_BYTES
+        );
+        assert!(read_frame(&mut reader, MAX_FRAME_BYTES)
+            .await
+            .expect("EOF")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn frame_reader_preserves_split_unicode_crlf_and_unterminated_tail() {
+        let mut reader = BufReader::with_capacity(1, "é\r\nlast".as_bytes());
+        assert_eq!(
+            read_frame(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .expect("unicode"),
+            Some("é".into())
+        );
+        assert_eq!(
+            read_frame(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .expect("tail"),
+            Some("last".into())
+        );
+        assert!(read_frame(&mut reader, MAX_FRAME_BYTES)
+            .await
+            .expect("EOF")
+            .is_none());
+        let mut reader = BufReader::new([0xff, b'\n'].as_slice());
+        assert_eq!(
+            read_frame(&mut reader, MAX_FRAME_BYTES)
+                .await
+                .expect_err("invalid UTF8")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn pending_capacity_is_closed_without_evicting_correlation() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        for id in 0..MAX_PENDING_REQUESTS {
+            register_request(&pending, &json!({"id": id, "method": "tools/call"}))
+                .expect("capacity");
+        }
+        assert!(
+            register_request(&pending, &json!({"id": "overflow", "method": "tools/call"})).is_err()
+        );
+        assert!(
+            take_response_request(&pending, &json!({"id": 0, "result": {}}))
+                .expect("ID")
+                .is_some()
+        );
+        register_request(&pending, &json!({"id": "new", "method": "tools/call"}))
+            .expect("freed slot");
+        assert!(register_request(&pending, &json!({"id": "new", "method": "tools/call"})).is_err());
+    }
+
+    #[test]
+    fn pending_metadata_cannot_grow_to_count_times_frame_limit() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let huge_name = "x".repeat(MAX_PENDING_METADATA_BYTES);
+        assert!(register_request(
+            &pending,
+            &json!({"id": 1, "method": "tools/call", "params": {"name": huge_name}})
+        )
+        .is_err());
+        assert!(pending.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn decimal_id_keys_preserve_exact_values_without_binary_float_rounding() {
+        let key = |raw: &str| request_id_key(&serde_json::from_str::<Value>(raw).expect("JSON"));
+        let groups: &[&[&str]] = &[
+            &["1", "1.0", "1.000e0", "10e-1", "0.1e1"],
+            &["0", "-0", "-0.0", "0e9999999999999999999999999999999"],
+            &["-12.34", "-1234e-2", "-1.234e1", "-1234000e-5"],
+            &[
+                "9007199254740993",
+                "9007199254740993.0",
+                "90071992547409930e-1",
+            ],
+            &["18446744073709551616", "184467440737095516160e-1"],
+        ];
+        for group in groups {
+            for raw in *group {
+                assert_eq!(
+                    key(raw).expect("canonical"),
+                    key(group[0]).expect("canonical")
+                );
+            }
+        }
+        assert_ne!(
+            key("9007199254740992").expect("key"),
+            key("9007199254740993").expect("key")
+        );
+        assert_ne!(
+            key("0.1").expect("key"),
+            key("0.10000000000000000001").expect("key")
+        );
+        assert_ne!(
+            key("1").expect("key"),
+            request_id_key(&json!("1")).expect("string")
+        );
+        assert!(key("1e9999999999999999999999999999999").is_err());
+    }
+
+    #[test]
+    fn correlation_does_not_consume_requests_for_server_messages() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        register_request(
+            &pending,
+            &json!({"id": 1, "method": "tools/call", "params": {"name": "echo"}}),
+        )
+        .expect("register");
+        assert!(take_response_request(
+            &pending,
+            &json!({"id": 1, "method": "sampling/createMessage"})
+        )
+        .expect("ID")
+        .is_none());
+        assert!(take_response_request(&pending, &json!({"id": 1}))
+            .expect("ID")
+            .is_none());
+        assert_eq!(
+            take_response_request(&pending, &json!({"id": 1, "result": {}})).expect("ID"),
+            Some(("tools/call".into(), Some("echo".into())))
+        );
+        assert!(
+            take_response_request(&pending, &json!({"id": 1, "result": {}}))
+                .expect("ID")
+                .is_none()
+        );
+    }
 
     #[test]
     fn extract_returns_args_text() {
@@ -1176,7 +1541,8 @@ mod tests {
         let r = block_response(
             json!(42),
             &["shell_substitution".to_string()],
-            &["CVE-X".to_string()],
+            &[],
+            &["ARMOR-SIM-SHELL-SUBSTITUTION".to_string()],
         );
         assert_eq!(r["error"]["code"], -32603);
         assert_eq!(r["id"], 42);

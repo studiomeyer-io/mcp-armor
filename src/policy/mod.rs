@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 pub mod loader;
 pub mod reload;
 
-pub use loader::{default_path, load_policy, FailMode, Policy};
+pub use loader::{default_path, load_policy, FailMode, Policy, ToolResponseMode};
 pub use reload::spawn_reload_task;
 
 /// Shared, mutable, thread-safe handle to the active policy. Held by the
