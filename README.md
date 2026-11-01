@@ -12,7 +12,7 @@
 
 Rust stdio sidecar that scans MCP tool calls, verifies Ed25519 manifests, detects tools/list drift and poisoning, strips selected loader-class environment keys and normalizes supported Unicode/terminal escape patterns. Optional features provide an rmcp control plane, OTLP telemetry and Rekor REST lookup. The release perf gate measures a defined representative workload; it is not an arbitrary-input latency guarantee.
 
-The source checkout is candidate **0.8.2**, with local R3 source acceptance. It includes the response blocking, frame limits and field-context changes below. No 0.8.2 GitHub tag, crates.io package, ghcr image or registry publication is claimed; the tested local OCI image is a local artifact. The existing 0.8.1 release does not include these additions.
+Version **0.8.2** includes the response blocking, frame limits and field-context changes below. Versions through 0.8.1 do not include these additions.
 
 > Anthropic has classified the underlying MCP-design issues (auto-invoke, marketplace tool-list trust, no manifest signing) as out-of-scope for the spec. mcp-armor implements the runtime defenses they declined to spec.
 
