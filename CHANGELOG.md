@@ -18,6 +18,7 @@ Candidate version: **0.8.2**, locally reviewed with R3 GO. No tag, package, publ
 
 ### Advisory metadata and compatibility
 
+- Keep equivalent test assertions compatible with Rust 1.99 Clippy without suppressing warnings or changing scanner behavior.
 - Compile ten source-verified product advisories from cve-feed/advisories-2026-11-01.toml and 16 independent ARMOR-SIM fixtures from simulations.toml. Keep the former mixed feed as history only; preserve all original scanner payload/pattern pairs.
 - Match exact product names/declared aliases and expose affected, not_affected, unknown and not_checked version status. Unknown fixed versions remain unknown. Remove ambiguous n8n/excel aliases in favor of canonical/source-qualified products; use the corrected Excel <0.1.8 range and ignore build metadata for precedence.
 - Keep cve_refs empty on generic scanner/collision findings and expose internal identifiers separately as simulation_refs. Prefer simulation_id for armor_simulate_attack; accept legacy cve_id only as a fixture migration alias.

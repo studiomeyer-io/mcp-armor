@@ -195,7 +195,7 @@ mod tests {
                 format!("https://nvd.nist.gov/vuln/detail/{}", c.id)
             );
             assert_eq!(c.checked_at, "2026-11-01");
-            assert!(!c.product.is_empty());
+            assert_ne!(c.product, "");
             assert!(c.simulate_payload.is_empty() && c.expected_pattern_id.is_empty());
         }
         for unrelated in [
