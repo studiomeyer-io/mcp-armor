@@ -4,7 +4,29 @@ All notable changes to mcp-armor are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.2] - 2026-11-01
+
+### Security
+
+- Add independent tool_response_mode warn/block policy, default warn. Blocking replaces a matched successful tools/call response with -32603, retaining correlated IDs. Matched successful envelopes with missing or uncorrelated IDs are blocked too.
+- Bound both line-frame readers, default 16 MiB, configurable from 1 byte to 256 MiB. Oversized frames close transport without forwarding a partial frame. Reject duplicate/pending-capacity overflow without eviction.
+- Scope safe decoded text fields to text context while keeping executable ancestors and unknown fields strict. Supported embedded-resource text is recognized through result.content[].resource.text, including actual rmcp serialization. Unknown/executable ancestry stays strict. CLI raw scanning stays strict; quoted override phrases remain a known false-positive boundary.
+- Limit reply draining after client EOF to one second, then cancel the output pump and kill/reap the child. Exact decimal ID normalization preserves large integers, fractions and exponent equivalence without f64 correlation; out-of-range nonzero exponents close the transport.
+- Wire each regex branch through its own reachable overlapping Aho gate. Preserve pattern-based coverage limits; no generic decoder or shell sandbox is implied.
+
+### Advisory metadata and compatibility
+
+- Keep equivalent test assertions compatible with Rust 1.99 Clippy without suppressing warnings or changing scanner behavior.
+- Compile ten source-verified product advisories from cve-feed/advisories-2026-11-01.toml and 16 independent ARMOR-SIM fixtures from simulations.toml. Keep the former mixed feed as history only; preserve all original scanner payload/pattern pairs.
+- Match exact product names/declared aliases and expose affected, not_affected, unknown and not_checked version status. Unknown fixed versions remain unknown. Remove ambiguous n8n/excel aliases in favor of canonical/source-qualified products; use the corrected Excel <0.1.8 range and ignore build metadata for precedence.
+- Keep cve_refs empty on generic scanner/collision findings and expose internal identifiers separately as simulation_refs. Prefer simulation_id for armor_simulate_attack; accept legacy cve_id only as a fixture migration alias.
+- Update the locked Tokio dependency to 1.54.1. The 0.8.2 default/all-features builder suites pass 470/477 tests. Its targeted default run passes 27 tests; independent R3 acceptance passes 28 all-feature targeted tests. Earlier release-p99 evidence remains tied to its measured R2 source snapshot, without a new R3 timing or MSRV claim.
+
+### Documentation
+
+- Update checked test counts, resolved dependency versions, actual feed path and explicit proxy limits/defaults.
+- Document the separated advisories and simulations, primary source links, corrected product/version metadata and version-status API. Generic controls do not establish a CVE association.
+- Confirm from the current implementation that Rekor SET checks remain structural-only. Rekor v2 verification, TUF key verification and Fulcio certificate-chain verification are still unimplemented.
 
 ### Security
 

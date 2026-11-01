@@ -31,7 +31,7 @@ impl AhoStage {
 
     pub fn matches(&self, haystack: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for m in self.ac.find_iter(haystack) {
+        for m in self.ac.find_overlapping_iter(haystack) {
             if let Some(pid) = self.pattern_ids.get(m.pattern().as_usize()) {
                 if !out.contains(pid) {
                     out.push(pid.clone());
@@ -46,20 +46,15 @@ impl AhoStage {
 /// stage refines hits — Aho only needs to be a cheap first cut.
 fn trigger_strings(pattern_id: &str) -> &'static [&'static str] {
     match pattern_id {
-        "shell_substitution" => &["$(", "`", "; sh", "| sh", "&& sh"],
-        "localhost_callback" => &["127.0.0.1", "localhost:", "0.0.0.0"],
-        "auto_invoke_privileged" => &["auto_invoke", "/etc/passwd", "/etc/shadow", "id_rsa"],
+        "shell_substitution" => &["$(", "`", ";"],
+        "localhost_callback" => &["127.0.0.1", "localhost", "0.0.0.0"],
+        "auto_invoke_privileged" => &["auto_invoke", "/etc/", ".ssh/id_"],
         "javascript_uri" => &["javascript:", "data:text/html"],
-        "instruction_override" => &[
-            "ignore previous",
-            "ignore prior",
-            "disregard the above",
-            "system prompt",
-        ],
+        "instruction_override" => &["ignore", "disregard", "system"],
         "tag_injection" => &["</tool_result>", "</system>", "<system>", "</user>"],
-        "zero_width_obfuscation" => &["ignore previous", "ignore prior"],
-        "html_script_inject" => &["<script", "</script", "onerror=", "onload="],
-        "tag_unicode_evasion" => &["ignore previous", "reveal", "secret"],
+        "zero_width_obfuscation" => &["ignore"],
+        "html_script_inject" => &["<script", "onerror", "onload", "onclick"],
+        "tag_unicode_evasion" => &["ignore", "reveal"],
         "fullwidth_evasion" => &["sudo", "rm -rf", "curl", "wget"],
         "path_traversal" => &["../", "..\\", "%2e%2e", "..%2f", "..%5c"],
         _ => &[],

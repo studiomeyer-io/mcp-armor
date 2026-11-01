@@ -1,13 +1,13 @@
 //! v0.5 R1 — Regression tests for the seven Round-1 review fixes.
 //!
 //! 1. NFKC + whitespace-trim on tool-name in fingerprint
-//!    (Research-P0, Lyrie CVE-2026-29774 class)
+//!    (Research-P0, Lyrie ARMOR-SIM-TOOL-NAME-COLLISION class)
 //! 2. TOCTOU merge-on-persist (Critic-HIGH + Analyst-W3)
 //! 3. JSON-RPC error code -32603 → -32001 (Critic-MED)
 //! 4. required_set_hash widened 64-bit → 128-bit (Critic-HIGH)
 //! 5. tools_list_drift_detection in armor_get_policy output (Analyst-W5)
 //! 6. notifications/tools/list_changed handler (Research-P0)
-//! 7. CVE feed Lyrie + rmcp + n8n-mcp + Excel-MCP refresh (Research-P1)
+//! 7. Verified product advisory lookups refresh (Research-P1)
 
 use mcp_armor::control::handle_request;
 use mcp_armor::control::history::ScanHistory;
@@ -267,9 +267,9 @@ fn r1_p1_6_tools_call_not_recognised_as_list_changed() {
     assert!(!looks_like_list_changed_notification(&v));
 }
 
-// ── Fix 7: CVE feed Lyrie + rmcp + n8n-mcp + Excel-MCP ────────────────
+// ── Fix 7: Verified product advisory lookups ────────────────
 
-/// All four refresh-wave CVEs must be `armor_check_cve`-queryable. The
+/// The source-verified product advisories must be `armor_check_cve`-queryable. The
 /// scanner unit test in src/cve/feed.rs already pins the IDs are
 /// present; here we pin that they reach the control-plane tool.
 #[test]
@@ -304,7 +304,7 @@ fn r1_p1_7_armor_check_cve_finds_n8n_mcp_creds_leak() {
         "jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{
             "name":"armor_check_cve",
-            "arguments":{"server_name":"n8n"}
+            "arguments":{"server_name":"n8n-mcp"}
         }
     });
     let resp = handle_request(&req, &scanner, &policy, &history);
@@ -327,7 +327,7 @@ fn r1_p1_7_armor_check_cve_finds_excel_mcp_path_traversal() {
         "jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{
             "name":"armor_check_cve",
-            "arguments":{"server_name":"excel"}
+            "arguments":{"server_name":"excel-mcp-server"}
         }
     });
     let resp = handle_request(&req, &scanner, &policy, &history);
@@ -342,25 +342,17 @@ fn r1_p1_7_armor_check_cve_finds_excel_mcp_path_traversal() {
 }
 
 #[test]
-fn r1_p1_7_armor_check_cve_finds_lyrie_collision_class() {
+fn unrelated_tool_name_collision_is_not_reported_as_a_product_cve() {
     let scanner = Scanner::new().expect("scanner");
     let policy = Policy::default();
     let history = ScanHistory::new(100);
-    let req = json!({
-        "jsonrpc":"2.0","id":1,"method":"tools/call",
-        "params":{
-            "name":"armor_check_cve",
-            "arguments":{"server_name":"mcp-spec"}
-        }
-    });
+    let req = json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{
+        "name":"armor_check_cve", "arguments":{"server_name":"mcp-spec"}
+    }});
     let resp = handle_request(&req, &scanner, &policy, &history);
-    let cves = resp["result"]["structuredContent"]["affected_cves"]
-        .as_array()
-        .expect("array");
-    assert!(
-        cves.iter()
-            .any(|c| c["id"].as_str() == Some("CVE-2026-29774")),
-        "Lyrie MCP-1.4 tool-name collision CVE-2026-29774 must surface via armor_check_cve"
+    assert_eq!(
+        resp["result"]["structuredContent"]["affected_cves"],
+        json!([])
     );
 }
 
@@ -438,7 +430,7 @@ fn r2_w5_param_names_dedupe_after_canonicalisation() {
 /// `generated` date stops tracking the last curation pass.
 #[test]
 fn r2_w2_cve_feed_filename_reflects_curation_provenance() {
-    // v0.8 renamed the feed to `curated-2026-07-03.toml` (added the
+    // v0.8 renamed the feed to `advisories-2026-11-01.toml` (added the
     // filesystem path-traversal defense-in-depth entry). If anyone
     // reverts the rename without updating `include_str!`, this test and
     // its sibling comment live at the integration boundary as
@@ -446,7 +438,7 @@ fn r2_w2_cve_feed_filename_reflects_curation_provenance() {
     use mcp_armor::cve::FEED;
     let f = FEED().expect("feed parses");
     assert_eq!(
-        f.generated, "2026-07-03",
+        f.generated, "2026-11-01",
         "feed generated date should reflect the latest curated provenance, not a legacy timestamp"
     );
 }

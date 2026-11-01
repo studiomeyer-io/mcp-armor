@@ -1,8 +1,8 @@
-//! v0.7 — CVE-2026-29774 tool-name homoglyph/zero-width collision class.
+//! v0.7 — ARMOR-SIM-TOOL-NAME-COLLISION tool-name homoglyph/zero-width collision class.
 //!
 //! ## Why this file exists
 //!
-//! The CVE feed entry for CVE-2026-29774 (`cve-feed/curated-2026-05-28.toml`)
+//! The internal ARMOR-SIM-TOOL-NAME-COLLISION fixture (`cve-feed/simulations.toml`)
 //! carries `expected_pattern_id = "instruction_override"`, which matches
 //! the *embedded description string* (`ignore previous instructions`) in
 //! its `simulate_payload` — not the tool-name collision itself. So the
@@ -23,17 +23,17 @@ use mcp_armor::manifest::drift::{fold_identifier, tool_name_collision, History a
 use mcp_armor::{ScanVerdict, Scanner};
 use serde_json::json;
 
-/// The literal CVE-2026-29774 example: a zero-width-suffixed
+/// The literal ARMOR-SIM-TOOL-NAME-COLLISION example: a zero-width-suffixed
 /// `send_message` collides with the trusted `send_message`, and the
 /// collision detection flags it.
 #[test]
-fn cve_2026_29774_zero_width_tool_name_is_flagged() {
+fn zero_width_tool_name_is_flagged() {
     let known = vec!["send_message".to_string(), "read_file".to_string()];
     let attacker = "send_message\u{200B}"; // zero-width space suffix
     assert_eq!(
         tool_name_collision(attacker, &known),
         Some("send_message".to_string()),
-        "the CVE-2026-29774 zero-width tool-name collision must be flagged"
+        "the ARMOR-SIM-TOOL-NAME-COLLISION zero-width tool-name collision must be flagged"
     );
 }
 

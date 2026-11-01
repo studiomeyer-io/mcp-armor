@@ -2,17 +2,9 @@ use crate::error::ArmorError;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-// v0.5 R2 Analyst-W2 fix: file renamed from `ox-advisory-2026-04-15.toml`
-// to `curated-2026-05-28.toml` to reflect that the feed now combines
-// the OX advisory wave with Lyrie + rmcp + n8n-mcp + Excel-MCP refresh
-// CVEs. v0.8 rename to `curated-2026-07-03.toml` — the feed gained the
-// v0.7 ANSI/terminal-escape entry and the v0.8 filesystem
-// path-traversal defense-in-depth entry, so the dated name tracks the
-// last curation pass. Old name was misleading once the curation stopped
-// being OX-only.
-const FEED_TOML: &str = include_str!("../../cve-feed/curated-2026-07-03.toml");
+const FEED_TOML: &str = include_str!("../../cve-feed/advisories-2026-11-01.toml");
+const SIMULATIONS_TOML: &str = include_str!("../../cve-feed/simulations.toml");
 
-/// CVE severity level. Constrained enum (was `String` — F9 lift).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -20,33 +12,96 @@ pub enum Severity {
     High,
     Medium,
     Low,
+    /// The checked primary evidence did not establish severity.
+    Unknown,
 }
 
 impl Severity {
     pub fn as_str(self) -> &'static str {
         match self {
-            Severity::Critical => "critical",
-            Severity::High => "high",
-            Severity::Medium => "medium",
-            Severity::Low => "low",
+            Self::Critical => "critical",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+            Self::Unknown => "unknown",
         }
     }
 }
 
+/// A primary-source-verified advisory. It does not assert that a scanner
+/// pattern detects this product vulnerability or that wrapping fixes it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Cve {
     pub id: String,
+    pub product: String,
+    #[serde(default)]
+    pub product_aliases: Vec<String>,
     pub severity: Severity,
     pub title: String,
+    /// A verified fixed version, or the explicit value `unknown`.
     pub fixed_in: String,
-    /// Optional semver `VersionReq` matching the affected version range
-    /// (e.g. `"<2.4.0"`). Added in v0.1.0 to support `armor_check_cve`
-    /// version-aware matching (Reviewer F6 fix, S983). When `None`, the
-    /// caller falls back to the legacy substring match on `fixed_in`.
-    #[serde(default)]
     pub affected_versions: Option<String>,
+    pub source_url: String,
+    pub checked_at: String,
+    /// Legacy source-compatibility fields. Genuine advisories do not carry
+    /// generic scanner fixtures; these remain empty. Use `simulations()`.
+    #[serde(default)]
     pub simulate_payload: String,
+    #[serde(default)]
     pub expected_pattern_id: String,
+}
+
+impl Cve {
+    pub fn matches_product(&self, name: &str) -> bool {
+        self.product.eq_ignore_ascii_case(name.trim())
+            || self
+                .product_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// `affected` only for the primary source's explicit affected range.
+    /// A known affected example with no fixed version cannot establish the
+    /// status of any other version. Direct comparisons include prereleases,
+    /// unlike VersionReq's implicit exclusion of most prerelease versions.
+    pub fn version_status(&self, version: Option<&str>) -> &'static str {
+        let Some(raw) = version else {
+            return "not_checked";
+        };
+        let Ok(version) = semver::Version::parse(raw.trim().trim_start_matches('v')) else {
+            return "unknown";
+        };
+        let Some(range) = self.affected_versions.as_deref() else {
+            return "unknown";
+        };
+        let (op, boundary) = if let Some(v) = range.strip_prefix("<=") {
+            ("<=", v)
+        } else if let Some(v) = range.strip_prefix('<') {
+            ("<", v)
+        } else if let Some(v) = range.strip_prefix('=') {
+            ("=", v)
+        } else {
+            return "unknown";
+        };
+        let Ok(boundary) = semver::Version::parse(boundary.trim()) else {
+            return "unknown";
+        };
+        let affected = match op {
+            "<=" => version.cmp_precedence(&boundary).is_le(),
+            "<" => version.cmp_precedence(&boundary).is_lt(),
+            _ => version.cmp_precedence(&boundary).is_eq(),
+        };
+        if affected {
+            return "affected";
+        }
+        if semver::Version::parse(&self.fixed_in)
+            .is_ok_and(|fixed| version.cmp_precedence(&fixed).is_ge())
+        {
+            "not_affected"
+        } else {
+            "unknown"
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,10 +111,41 @@ pub struct CveFeed {
     pub cves: Vec<Cve>,
 }
 
-static FEED_CELL: OnceLock<CveFeed> = OnceLock::new();
+#[derive(Debug, Clone, Deserialize)]
+pub struct Simulation {
+    pub id: String,
+    pub title: String,
+    /// Migration alias for old armor_simulate_attack input only. It is not
+    /// a claimed relationship between this fixture and the named CVE.
+    pub legacy_cve_id: String,
+    pub simulate_payload: String,
+    pub expected_pattern_id: String,
+}
 
-/// Get the compiled-in feed. Parsed lazily on first call. Returns
-/// `&'static CveFeed` so callers do not pay the parse cost more than once.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SimulationFeed {
+    pub generated: String,
+    pub schema_version: u32,
+    pub simulations: Vec<Simulation>,
+}
+
+impl SimulationFeed {
+    pub fn find(&self, id: &str) -> Option<&Simulation> {
+        self.simulations
+            .iter()
+            .find(|s| s.id.eq_ignore_ascii_case(id))
+    }
+
+    pub fn resolve_legacy(&self, id: &str) -> Option<&Simulation> {
+        self.simulations
+            .iter()
+            .find(|s| s.legacy_cve_id.eq_ignore_ascii_case(id))
+    }
+}
+
+static FEED_CELL: OnceLock<CveFeed> = OnceLock::new();
+static SIMULATIONS_CELL: OnceLock<SimulationFeed> = OnceLock::new();
+
 pub fn feed() -> Result<&'static CveFeed, ArmorError> {
     if let Some(f) = FEED_CELL.get() {
         return Ok(f);
@@ -69,7 +155,15 @@ pub fn feed() -> Result<&'static CveFeed, ArmorError> {
     Ok(FEED_CELL.get().expect("feed just set"))
 }
 
-/// Backwards-compatible alias kept for call sites that pre-date the rename.
+pub fn simulations() -> Result<&'static SimulationFeed, ArmorError> {
+    if let Some(f) = SIMULATIONS_CELL.get() {
+        return Ok(f);
+    }
+    let parsed: SimulationFeed = toml::from_str(SIMULATIONS_TOML)?;
+    let _ = SIMULATIONS_CELL.set(parsed);
+    Ok(SIMULATIONS_CELL.get().expect("simulations just set"))
+}
+
 #[doc(hidden)]
 #[allow(non_snake_case)]
 pub fn FEED() -> Result<&'static CveFeed, ArmorError> {
@@ -80,7 +174,6 @@ impl CveFeed {
     pub fn find(&self, id: &str) -> Option<&Cve> {
         self.cves.iter().find(|c| c.id.eq_ignore_ascii_case(id))
     }
-
     pub fn ids(&self) -> Vec<String> {
         self.cves.iter().map(|c| c.id.clone()).collect()
     }
@@ -91,74 +184,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feed_parses() {
-        let f = FEED().expect("feed must parse");
-        // OX advisory wave 2026-04-15 (10 CVEs) + v0.5 refresh wave
-        // 2026-05-28 (4 CVEs: rmcp DNS-rebinding, n8n-mcp credential
-        // leak, Excel-MCP path traversal, Lyrie tool-name collision
-        // class) + v0.7 ANSI/terminal-escape defense-in-depth entry
-        // (CVE-2026-31955) + v0.8 filesystem path-traversal
-        // defense-in-depth entry (CVE-2026-53881). Total expected: 16.
-        assert_eq!(
-            f.cves.len(),
-            16,
-            "expected exactly 16 CVEs (10 OX advisory + 4 v0.5 refresh + 1 v0.7 ANSI + 1 v0.8 path-traversal)"
-        );
-    }
-
-    /// v0.8 — the filesystem path-traversal defense-in-depth entry must be
-    /// present and keyed to the new `path_traversal` scanner pattern.
-    #[test]
-    fn feed_contains_v08_path_traversal_cve() {
-        let f = FEED().expect("feed must parse");
-        let c = f
-            .find("CVE-2026-53881")
-            .expect("v0.8 path-traversal CVE missing from feed");
-        assert_eq!(c.expected_pattern_id, "path_traversal");
-    }
-
-    /// v0.5 R1 Research-P1 — verify the 4 new CVE IDs from the refresh
-    /// wave are actually present (catches accidental delete of feed
-    /// entries before commit).
-    #[test]
-    fn feed_contains_v05_refresh_wave_cves() {
-        let f = FEED().expect("feed must parse");
-        let ids: Vec<&str> = f.cves.iter().map(|c| c.id.as_str()).collect();
-        for required in [
-            "CVE-2026-42559", // rmcp DNS-rebinding
-            "CVE-2026-42282", // n8n-mcp creds-in-logs
-            "CVE-2026-40576", // Excel-MCP path traversal
-            "CVE-2026-29774", // Lyrie tool-name collision class
+    fn real_advisories_have_primary_provenance_and_no_scanner_claims() {
+        let f = FEED().expect("advisories");
+        assert_eq!(f.cves.len(), 10);
+        assert_eq!(f.generated, "2026-11-01");
+        for c in &f.cves {
+            assert!(c.id.starts_with("CVE-"));
+            assert_eq!(
+                c.source_url,
+                format!("https://nvd.nist.gov/vuln/detail/{}", c.id)
+            );
+            assert_eq!(c.checked_at, "2026-11-01");
+            assert_ne!(c.product, "");
+            assert!(c.simulate_payload.is_empty() && c.expected_pattern_id.is_empty());
+        }
+        for unrelated in [
+            "CVE-2026-30888",
+            "CVE-2026-29774",
+            "CVE-2026-31955",
+            "CVE-2026-31104",
+            "CVE-2026-31312",
+            "CVE-2026-53881",
         ] {
             assert!(
-                ids.contains(&required),
-                "v0.5 refresh wave CVE {required} missing from feed"
+                f.find(unrelated).is_none(),
+                "unrelated or unverified advisory: {unrelated}"
             );
         }
     }
 
     #[test]
-    fn every_cve_has_simulate_payload() {
-        let f = FEED().expect("feed must parse");
-        for c in &f.cves {
-            assert!(
-                !c.simulate_payload.is_empty(),
-                "{} missing simulate_payload",
-                c.id
-            );
-            assert!(
-                !c.expected_pattern_id.is_empty(),
-                "{} missing pattern id",
-                c.id
-            );
+    fn all_sixteen_internal_fixtures_keep_distinct_ids_and_payloads() {
+        let f = simulations().expect("simulations");
+        assert_eq!(f.simulations.len(), 16);
+        let mut ids = std::collections::BTreeSet::new();
+        for s in &f.simulations {
+            assert!(s.id.starts_with("ARMOR-SIM-"));
+            assert!(ids.insert(&s.id));
+            assert!(!s.simulate_payload.is_empty() && !s.expected_pattern_id.is_empty());
+            assert_eq!(f.find(&s.id).expect("lookup").id, s.id);
         }
     }
 
     #[test]
-    fn find_is_case_insensitive() {
-        let f = FEED().expect("feed must parse");
-        assert!(f.find("cve-2026-27124").is_some());
-        assert!(f.find("CVE-2026-27124").is_some());
-        assert!(f.find("CVE-9999-0000").is_none());
+    fn prereleases_and_unknown_fixes_are_not_invented_safe_versions() {
+        let f = FEED().expect("feed");
+        let libre = f.find("CVE-2026-22252").expect("LibreChat");
+        assert_eq!(libre.version_status(Some("0.8.2-rc1")), "affected");
+        assert_eq!(libre.version_status(Some("0.8.2-rc2")), "not_affected");
+        assert_eq!(libre.version_status(Some("0.8.2")), "not_affected");
+        let windsurf = f.find("CVE-2026-30615").expect("Windsurf");
+        assert_eq!(windsurf.fixed_in, "unknown");
+        assert_eq!(windsurf.version_status(Some("1.9544.26")), "affected");
+        assert_eq!(windsurf.version_status(Some("1.9544.27")), "unknown");
+        assert_eq!(windsurf.version_status(Some("1.0.0")), "unknown");
+        assert_eq!(windsurf.version_status(Some("garbage")), "unknown");
     }
 }

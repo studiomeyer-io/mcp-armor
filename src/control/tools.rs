@@ -79,7 +79,7 @@ pub fn list() -> Value {
             },
             {
                 "name": "armor_check_cve",
-                "description": "Look up a server name in the curated CVE feed and return affected entries.",
+                "description": "Look up exact product names or documented aliases in source-verified advisories; report affected, not_affected, or unknown version status. This does not prove scanner coverage.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -95,13 +95,14 @@ pub fn list() -> Value {
             },
             {
                 "name": "armor_simulate_attack",
-                "description": "Run the static simulate_payload for a CVE through the scanner. Never spawns the upstream binary.",
+                "description": "Run an internal ARMOR-SIM pattern fixture through the scanner. Not a CVE exploit or product-remediation test. Legacy cve_id input is a migration alias only.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "cve_id": {"type": "string"}
+                        "simulation_id": {"type": "string"},
+                        "cve_id": {"type": "string", "description": "Legacy simulation alias only; does not assert a CVE relationship."}
                     },
-                    "required": ["cve_id"]
+                    "anyOf": [{"required": ["simulation_id"]}, {"required": ["cve_id"]}]
                 },
                 "annotations": {
                     "readOnlyHint": true,
